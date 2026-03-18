@@ -1,27 +1,18 @@
-def inside_point(point, polygon):
-    """
-    Check if a point is inside a polygon.
+def inside(point, rect):
+    x = point[0]
+    y = point[1]
 
-    :param point: A tuple representing the (x, y) coordinates of the point.
-    :param polygon: A list of tuples representing the vertices of the polygon in order.
-    :return: True if the point is inside the polygon, False otherwise.
-    """
-    x, y = point
-    n = len(polygon)
-    inside = False  
+    xmin = min(rect[0][0], rect[1][0], rect[2][0], rect[3][0])
+    xmax = max(rect[0][0], rect[1][0], rect[2][0], rect[3][0])
 
-    p1x, p1y = polygon[0]
-    for i in range(n + 1):
-        p2x, p2y = polygon[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xinters:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
+    ymin = min(rect[0][1], rect[1][1], rect[2][1], rect[3][1])
+    ymax = max(rect[0][1], rect[1][1], rect[2][1], rect[3][1])
 
-    return inside
-ans = inside_point((3, 3), [(0, 0), (5, 0), (5, 5), (0, 5)])  # Should return True
-print(ans)
+    if xmin <= x <= xmax and ymin <= y <= ymax:
+        return True
+    else:
+        return False
+
+rect = [(0,0), (5,0), (5,5), (0,5)]
+print(inside((3,3), rect))  # True
+print(inside((6,3), rect))  # False
