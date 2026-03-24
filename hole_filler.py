@@ -3,7 +3,7 @@
 
 Algorithm Pipeline:
   1. Statistical Outlier Removal (SOR)
-  2. Axis Selection via Variance Analysis
+  2. Axis Selection via Variance Detecter
   3. Dual-Axis Slicing & 1D Gap Detection
   4. Slice-by-Slice Cubic Bezier Curve Filling
   5. Cross-Hatching Surface Generation (merge both axes)
@@ -452,6 +452,22 @@ def process_point_cloud(points,
     
     bezier_all_orig = np.vstack([bezier_pts_1_orig, bezier_pts_2_orig]) if len(bezier_pts_1_orig) or len(bezier_pts_2_orig) else np.empty((0,3))
 
+    # Convert gap boundary points back to original space
+    def get_boundary_pts_orig(gaps):
+        if not gaps:
+            return np.empty((0, 3))
+        # Each gap is (p_left, p_right, dist, axis_val)
+        b_pts_pca = []
+        for p_left, p_right, _, _ in gaps:
+            b_pts_pca.append(p_left)
+            b_pts_pca.append(p_right)
+        b_pts_pca = np.array(b_pts_pca)
+        return apply_inverse_pca(b_pts_pca, rotation_matrix, mean_pt)
+
+    boundary_pts_axis1_orig = get_boundary_pts_orig(gaps_axis1)
+    boundary_pts_axis2_orig = get_boundary_pts_orig(gaps_axis2)
+    boundary_pts_all_orig = np.vstack([boundary_pts_axis1_orig, boundary_pts_axis2_orig]) if len(boundary_pts_axis1_orig) or len(boundary_pts_axis2_orig) else np.empty((0,3))
+
     # Merge in original space with a dynamic merge distance based on average spacing
     merge_dist = avg_point_spacing * 0.2
     merged_orig = merge_and_average_points(pts_clean_orig, bezier_all_orig, merge_distance=merge_dist)
@@ -465,6 +481,9 @@ def process_point_cloud(points,
         'bezier_pts_axis1': bezier_pts_1_orig,
         'bezier_pts_axis2': bezier_pts_2_orig,
         'combined_bezier_pts': bezier_all_orig,
+        'boundary_pts_axis1': boundary_pts_axis1_orig,
+        'boundary_pts_axis2': boundary_pts_axis2_orig,
+        'combined_boundary_pts': boundary_pts_all_orig,
         'merged_points': merged_orig,
         'axis_1': axis_1,
         'axis_2': axis_2,

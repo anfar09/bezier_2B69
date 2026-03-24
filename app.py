@@ -5,7 +5,7 @@ import os
 import pandas as pd
 import io
 
-from slicer import load_points_from_file, get_bounds, cuboid_slices, detect_holes_in_slices
+from slicer import load_points_from_file, get_bounds
 from hole_filler import process_point_cloud
 
 st.set_page_config(layout="wide")
@@ -22,7 +22,7 @@ if "hf_file" not in st.session_state:
 # ============================================================
 # Tabs
 # ============================================================
-tab1, tab2, tab3 = st.tabs(["3D View", "Analysis", "Hole Filling"])
+tab1, tab2, tab3 = st.tabs(["3D View", "Hole Detecter", "Hole Filling"])
 
 # ============================================================
 # TAB 1 – Original 3D viewer
@@ -121,63 +121,9 @@ with tab1:
 
 
 # ============================================================
-# TAB 2 – Original Analysis
+# TAB 2 – Hole Detecter (Configuration & Boundary Visualization)
 # ============================================================
 with tab2:
-    DATASET_FOLDER2 = "Dataset"
-    os.makedirs(DATASET_FOLDER2, exist_ok=True)
-
-    files2 = [f for f in os.listdir(DATASET_FOLDER2)
-              if f.endswith(('.txt', '.xyz', '.csv', '.pts'))]
-
-    if not files2:
-        st.error("ใส่ไฟล์ใน Dataset ก่อน")
-    else:
-        file2  = st.selectbox("เลือกไฟล์", files2, key="file2")
-        path2  = os.path.join(DATASET_FOLDER2, file2)
-
-        @st.cache_data
-        def load2(fp):
-            return load_points_from_file(fp)
-
-        points2  = np.array(load2(path2))
-        bounds2  = get_bounds(points2)
-
-        axis = st.selectbox("Axis", ["X", "Y", "Z"], key="axis2")
-
-        r = bounds2[axis.lower()][1] - bounds2[axis.lower()][0]
-        r = max(r, 1e-6)
-
-        w = st.number_input("Slice width", min_value=r/100,
-                            value=max(r/5, r/100), step=r/100, key="w2")
-
-        if st.button("Detect Hole", key="detect_hole_btn"):
-            axis_map = {"X": 1, "Y": 2, "Z": 3}
-            slices   = cuboid_slices(points2.tolist(), axis_map[axis], w)
-            results, mu = detect_holes_in_slices(slices, axis)
-
-            st.write("Mean gap μ =", mu)
-
-            df = pd.DataFrame(results)
-            st.dataframe(df)
-
-            for r in results:
-                if r["has_hole"]:
-                    st.error(f"Slice {r['slice']} → HOLE 🔴")
-                else:
-                    st.success(f"Slice {r['slice']} → OK 🟢")
-
-            csv = df.to_csv(index=False).encode()
-            st.download_button("Download CSV", csv, "result.csv")
-
-
-# ============================================================
-# TAB 3 – Hole Filling (backend: hole_filler.py)
-# ============================================================
-with tab3:
-    # ------------------------------------------------------------------
-    # Step 1: Local Dataset/ folder – no file uploader
-    # ------------------------------------------------------------------
     st.subheader("📁 Select Point Cloud")
     DB_FOLDER = "Dataset"
     os.makedirs(DB_FOLDER, exist_ok=True)
@@ -188,58 +134,40 @@ with tab3:
     ])
 
     if not db_files:
-        st.error(f"No `.xyz` files found in the `{DB_FOLDER}/` folder. "
-                 "Please add point cloud files there.")
+        st.error(f"No `.xyz` files found in the `{DB_FOLDER}/` folder.")
         st.stop()
 
-    selected_file = st.selectbox("Choose a file from Dataset/", db_files)
+    selected_file = st.selectbox("Choose a file from Dataset/", db_files, key="hf_file_select")
     file_path = os.path.join(DB_FOLDER, selected_file)
 
-    # Parse once using the same helper the rest of the app uses
     @st.cache_data
     def load_points_for_hf(fp):
         return np.array(load_points_from_file(fp))
 
     points_raw = load_points_for_hf(file_path)
+    st.info(f"**{len(points_raw)}** raw points loaded.")
 
-    st.info(f"**{len(points_raw)}** raw points loaded from `{file_path}`")
-
-    # ------------------------------------------------------------------
-    # Step 2: Hyperparameter UI
-    # ------------------------------------------------------------------
     st.subheader("⚙️ Hyperparameters")
-
     col_slice, col_gap = st.columns(2)
     with col_slice:
-        st.markdown("**slice_thickness** (leave empty = auto)")
-        slice_text = st.text_input("slice_thickness", value="",
-                                    placeholder="auto", label_visibility="collapsed")
+        st.markdown("**slice_thickness** (auto if empty)")
+        slice_text = st.text_input("slice_thickness", value="", placeholder="auto", key="st_in")
         slice_thickness = float(slice_text) if slice_text.strip() else None
-
     with col_gap:
-        st.markdown("**gap_threshold** (leave empty = auto)")
-        gap_text = st.text_input("gap_threshold", value="",
-                                 placeholder="auto", label_visibility="collapsed")
+        st.markdown("**gap_threshold** (auto if empty)")
+        gap_text = st.text_input("gap_threshold", value="", placeholder="auto", key="gt_in")
         gap_threshold = float(gap_text) if gap_text.strip() else None
 
     col_np, col_nk = st.columns(2)
     with col_np:
-        num_points = st.number_input(
-            "num_points_per_gap", min_value=3, max_value=100, value=20)
-
+        num_points = st.number_input("num_points_per_gap", min_value=3, max_value=100, value=20, key="np_in")
     with col_nk:
-        neighbor_k = st.slider(
-            "neighbor_k", min_value=2, max_value=30, value=10,
-            help="Number of nearest neighbours used to estimate surface tangent at each "
-                 "gap boundary. Higher values give smoother curves but are slower.")
+        neighbor_k = st.slider("neighbor_k", min_value=2, max_value=30, value=10, key="nk_in")
 
-    run = st.button("🚀 Run Hole Filling", type="primary")
+    run = st.button("🚀 Run Detection", type="primary")
 
-    # ------------------------------------------------------------------
-    # Step 3: Run backend on button click → cache in session_state
-    # ------------------------------------------------------------------
     if run:
-        with st.spinner("Running hole-filling pipeline..."):
+        with st.spinner("Detecting holes..."):
             result = process_point_cloud(
                 points_raw,
                 slice_thickness=slice_thickness,
@@ -248,167 +176,82 @@ with tab3:
                 neighbor_k=neighbor_k,
                 verbose=False,
             )
-        # Store once; viz toggle will read from here without re-running
-        st.session_state["hf_result"]    = result
-        st.session_state["hf_file"]     = selected_file
+        st.session_state["hf_result"] = result
+        st.session_state["hf_file"] = selected_file
 
-    # ------------------------------------------------------------------
-    # Step 4: Unpack all 6 values from the backend result dict
-    # ------------------------------------------------------------------
-    result    = st.session_state.get("hf_result")
+    result = st.session_state.get("hf_result")
+    if result is not None:
+        original_pts = result['original_inlier_points']
+        boundary_pts = result['combined_boundary_pts']
+        
+        st.subheader("🌀 Hole Boundary Visualization")
+        fig = go.Figure()
+        if len(original_pts) > 0:
+            fig.add_trace(go.Scatter3d(
+                x=original_pts[:, 0], y=original_pts[:, 1], z=original_pts[:, 2],
+                mode='markers',
+                marker=dict(size=2, color='#4A90D9', opacity=0.3, line=dict(width=0)),
+                name='Inliers',
+            ))
+        if len(boundary_pts) > 0:
+            fig.add_trace(go.Scatter3d(
+                x=boundary_pts[:, 0], y=boundary_pts[:, 1], z=boundary_pts[:, 2],
+                mode='markers',
+                marker=dict(size=5, color='red', opacity=1.0, line=dict(width=1, color='white')),
+                name=f'Hole Boundaries ({len(boundary_pts)})',
+            ))
+        fig.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# TAB 3 – Hole Filling (Results & Export)
+# ============================================================
+with tab3:
+    result = st.session_state.get("hf_result")
     file_name = st.session_state.get("hf_file", "cloud")
 
     if result is not None:
-        # Unpack all 6 values from the backend result
         original_pts    = result['original_inlier_points']
         bezier_pts_1    = result['bezier_pts_axis1']
         bezier_pts_2    = result['bezier_pts_axis2']
         combined_bezier = result['combined_bezier_pts']
         merged          = result['merged_points']
-        axis_1_name     = result['axis_1']   # e.g. 'X', 'Y', or 'Z'
-        axis_2_name     = result['axis_2']   # e.g. 'X', 'Y', or 'Z'
+        axis_1_name     = result['axis_1']
+        axis_2_name     = result['axis_2']
         num_gaps        = len(result['gaps_axis1']) + len(result['gaps_axis2'])
 
-        # ---- Stats ----
         st.subheader("📊 Results")
         ca, cb, cc, cd = st.columns(4)
-        ca.metric("Raw points",        f"{len(points_raw)}")
-        cb.metric("SOR inliers",       f"{len(original_pts)}")
-        cc.metric("Gap pairs found",   f"{num_gaps}")
-        cd.metric("Fill points",       f"{result['num_filled']}")
+        ca.metric("Inliers", f"{len(original_pts)}")
+        cb.metric("Gap pairs", f"{num_gaps}")
+        cc.metric("Fill points", f"{result['num_filled']}")
+        cd.metric("Final points", f"{len(merged)}")
 
-        ce, cf = st.columns(2)
-        with ce:
-            st.write(f"**Primary axis:**   `{axis_1_name}`")
-            st.write(f"**Secondary axis:** `{axis_2_name}`")
-            st.write(f"**Thickness axis:** `{result['axis_3']}`")
-        with cf:
-            st.write(f"**slice_thickness:**   {result['slice_thickness']:.6f}")
-            st.write(f"**gap_threshold:**      {result['gap_threshold']:.6f}")
-            st.write(f"**avg_point_spacing:** {result['avg_point_spacing']:.6f}")
+        st.subheader("🌀 Filling Visualization")
+        axis1_label = f"{axis_1_name}-Axis Fill"
+        axis2_label = f"{axis_2_name}-Axis Fill"
+        mesh_label  = "Full Cross-Hatched"
 
-        cg, ch = st.columns(2)
-        with cg:
-            st.write(f"**{axis_1_name}-axis fill points:** {len(bezier_pts_1)}")
-        with ch:
-            st.write(f"**{axis_2_name}-axis fill points:** {len(bezier_pts_2)}")
+        viz_mode = st.radio("Fill Mode", options=[axis1_label, axis2_label, mesh_label], horizontal=True)
 
-        # ------------------------------------------------------------------
-        # Step 5: Dynamic Visualization Mode toggle
-        # ------------------------------------------------------------------
-        st.subheader("🌀 3D Visualization")
+        active_bezier = combined_bezier
+        if viz_mode == axis1_label: active_bezier = bezier_pts_1
+        elif viz_mode == axis2_label: active_bezier = bezier_pts_2
 
-        axis1_label = f"{axis_1_name}-Axis Fill Only"
-        axis2_label = f"{axis_2_name}-Axis Fill Only"
-        mesh_label  = "Full Cross-Hatched (Mesh)"
-
-        viz_mode = st.radio(
-            "Visualization Mode",
-            options=[axis1_label, axis2_label, mesh_label],
-            format_func=lambda x: x,
-            horizontal=True,
-            help=(
-                f"**{axis1_label}** — Bezier fill lines running along the "
-                f"`{axis_1_name}` (primary/highest-variance) axis only.\n"
-                f"**{axis2_label}** — Bezier fill lines running along the "
-                f"`{axis_2_name}` (secondary) axis only.\n"
-                f"**{mesh_label}** — Both sets of fill lines interleaved, "
-                "forming a cross-hatched NURBS-like mesh surface."
-            ),
-        )
-
-        # Select which Bezier points to show
-        if viz_mode == axis1_label:
-            active_bezier = bezier_pts_1
-            bezier_label  = f"{axis_1_name}-Axis Fill ({len(bezier_pts_1)})"
-        elif viz_mode == axis2_label:
-            active_bezier = bezier_pts_2
-            bezier_label  = f"{axis_2_name}-Axis Fill ({len(bezier_pts_2)})"
-        else:
-            active_bezier = combined_bezier
-            bezier_label  = f"Cross-Hatched ({len(combined_bezier)})"
-
-        # Build Plotly figure
         fig = go.Figure()
-
-        # Original inliers – light blue, semi-transparent
-        if len(original_pts) > 0:
-            fig.add_trace(go.Scatter3d(
-                x=original_pts[:, 0],
-                y=original_pts[:, 1],
-                z=original_pts[:, 2],
-                mode='markers',
-                marker=dict(size=2, color='#4A90D9', opacity=0.3, line=dict(width=0)),
-                name=f'Original Inliers ({len(original_pts)})',
-            ))
-
-        # Selected Bezier fill – neon green, fully opaque
+        fig.add_trace(go.Scatter3d(
+            x=original_pts[:, 0], y=original_pts[:, 1], z=original_pts[:, 2],
+            mode='markers', marker=dict(size=2, color='#4A90D9', opacity=0.3), name='Inliers'
+        ))
         if len(active_bezier) > 0:
             fig.add_trace(go.Scatter3d(
-                x=active_bezier[:, 0],
-                y=active_bezier[:, 1],
-                z=active_bezier[:, 2],
-                mode='markers',
-                marker=dict(size=3, color='#39FF14', opacity=1.0, line=dict(width=0)),
-                name=bezier_label,
+                x=active_bezier[:, 0], y=active_bezier[:, 1], z=active_bezier[:, 2],
+                mode='markers', marker=dict(size=3, color='#39FF14', opacity=1.0), name='Bezier Fill'
             ))
-
-        fig.update_layout(
-            title=dict(
-                text=f"Hole Fill — {viz_mode}  [{file_name}]",
-                x=0.5, font=dict(size=15),
-            ),
-            legend=dict(x=0.01, y=0.99,
-                        bgcolor='rgba(0,0,0,0.5)',
-                        font=dict(color='white')),
-            scene=dict(
-                xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
-                aspectmode='data',
-            ),
-            margin=dict(l=0, r=0, t=50, b=0),
-        )
-
+        fig.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
-        # ------------------------------------------------------------------
-        # Side-by-side per-axis comparison charts
-        # ------------------------------------------------------------------
-        if len(bezier_pts_1) > 0 or len(bezier_pts_2) > 0:
-            st.subheader("🔀 Axis Comparison")
-
-            left_col, right_col = st.columns(2)
-            for col, pts, ax_name in [
-                (left_col,  bezier_pts_1, axis_1_name),
-                (right_col, bezier_pts_2, axis_2_name),
-            ]:
-                with col:
-                    sub = go.Figure()
-                    if len(original_pts) > 0:
-                        sub.add_trace(go.Scatter3d(
-                            x=original_pts[:, 0], y=original_pts[:, 1], z=original_pts[:, 2],
-                            mode='markers',
-                            marker=dict(size=2, color='#4A90D9', opacity=0.3, line=dict(width=0)),
-                            name='Inliers',
-                        ))
-                    if len(pts) > 0:
-                        sub.add_trace(go.Scatter3d(
-                            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                            mode='markers',
-                            marker=dict(size=3, color='#FFD700', opacity=1.0, line=dict(width=0)),
-                            name=f'{ax_name}-Axis Fill',
-                        ))
-                    sub.update_layout(
-                        title=dict(text=f"{ax_name}-Axis Fill", x=0.5, font=dict(size=13)),
-                        scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
-                                   aspectmode='data'),
-                        margin=dict(l=0, r=0, t=30, b=0),
-                        height=400,
-                    )
-                    st.plotly_chart(sub, use_container_width=True)
-
-        # ------------------------------------------------------------------
-        # Export
-        # ------------------------------------------------------------------
         st.subheader("💾 Export")
         out_buf = io.StringIO()
         np.savetxt(out_buf, merged, fmt='%.8f %.8f %.8f')
@@ -418,7 +261,5 @@ with tab3:
             file_name=file_name.rsplit('.', 1)[0] + '_filled.xyz',
             mime='text/plain',
         )
-    elif run:
-        st.error("No result returned. Check the console for errors.")
     else:
-        st.info("Adjust hyperparameters above and click **🚀 Run Hole Filling** to begin.")
+        st.info("Please run detection in the **Hole Detecter** tab first.")
