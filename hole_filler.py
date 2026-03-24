@@ -53,23 +53,59 @@ def statistical_outlier_removal(points, k=10, std_multiplier=2.0):
 
 
 # =============================================================================
-# 2. AXIS SELECTION – VARIANCE ANALYSIS
+# 2. PCA ALIGNMENT – ROTATION TO PRINCIPAL AXES
 # =============================================================================
 
+def pca_align(points):
+    """
+    Perform PCA to find principal axes and rotate the point cloud
+    so that the axes of highest variance align with X and Y, 
+    and the axis of least variance (surface normal) aligns with Z.
+
+    Returns:
+        pts_rotated: points in the new PCA-aligned coordinate system
+        rotation_matrix: the 3x3 matrix used for rotation
+        mean_pt: the centroid subtracted before rotation
+    """
+    pts = np.asarray(points)
+    mean_pt = np.mean(pts, axis=0)
+    pts_centered = pts - mean_pt
+
+    # Compute Covariance Matrix
+    cov = np.cov(pts_centered, rowvar=False)
+
+    # Eigenvalues and Eigenvectors
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # Sort by eigenvalues descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvectors = eigenvectors[:, idx]
+    
+    # Ensure a right-handed coordinate system
+    if np.linalg.det(eigenvectors) < 0:
+        eigenvectors[:, 2] *= -1
+
+    # Rotate points
+    pts_rotated = pts_centered @ eigenvectors
+
+    return pts_rotated, eigenvectors, mean_pt
+
+
+def apply_inverse_pca(points_rotated, rotation_matrix, mean_pt):
+    """Map points back from PCA space to original 3D space."""
+    return (points_rotated @ rotation_matrix.T) + mean_pt
+
+
 def compute_variance_along_axes(points):
-    """Return variance for each axis sorted descending."""
+    """Return variance for each axis sorted descending (legacy wrapper)."""
     pts = np.asarray(points)
     variances = {
         'X': float(np.var(pts[:, 0])),
         'Y': float(np.var(pts[:, 1])),
         'Z': float(np.var(pts[:, 2])),
     }
-    # Sort axes by variance descending
     sorted_axes = sorted(variances, key=variances.get, reverse=True)
-    axis_1 = sorted_axes[0]   # Primary (highest variance)
-    axis_2 = sorted_axes[1]   # Secondary
-    axis_3 = sorted_axes[2]   # Thickness (lowest variance)
-    return axis_1, axis_2, axis_3, variances
+    return sorted_axes[0], sorted_axes[1], sorted_axes[2], variances
 
 
 AXIS_TO_COL = {'X': 0, 'Y': 1, 'Z': 2}
@@ -267,25 +303,34 @@ def cubic_bezier_fill_gap(p_left, p_right, num_points=20, neighbors_left=None, n
 # 5. CROSS-HATCHING SURFACE GENERATION
 # =============================================================================
 
-def merge_and_average_points(original, new_points, merge_distance=1e-4):
+def merge_and_average_points(original, new_points, merge_distance=1e-3):
     """
     Combine original + generated points, averaging near-duplicates.
     Uses KDTree to merge points within merge_distance.
     """
+    orig_pts = np.asarray(original)
     if len(new_points) == 0:
-        return np.asarray(original)
+        return orig_pts
 
-    all_pts = np.vstack([np.asarray(original), np.asarray(new_points)])
+    new_pts = np.asarray(new_points)
+    all_pts = np.vstack([orig_pts, new_pts])
     tree    = KDTree(all_pts)
 
     merged = []
-    used   = set()
+    used   = np.zeros(len(all_pts), dtype=bool)
+    
     for i in range(len(all_pts)):
-        if i in used:
+        if used[i]:
             continue
+        
+        # Find all points within merge_distance
         indices = tree.query_ball_point(all_pts[i], merge_distance)
-        used.update(indices)
-        merged.append(all_pts[list(indices)].mean(axis=0))
+        
+        # Mark them as used
+        used[indices] = True
+        
+        # Average the cluster
+        merged.append(np.mean(all_pts[indices], axis=0))
 
     return np.array(merged)
 
@@ -341,52 +386,25 @@ def process_point_cloud(points,
                         sor_std_multiplier=2.0,
                         verbose=True):
     """
-    Complete hole-filling pipeline.
-
-    Parameters
-    ----------
-    points                : array-like (N, 3)
-    slice_thickness       : float, bin width along slicing axes.
-                             If None, auto-computed as avg_point_spacing × 2.
-    gap_threshold         : float, 1D distance to flag as a gap.
-                             If None, auto-computed as avg_point_spacing × 5.
-    num_points_per_gap    : int, Bezier interpolation resolution
-    neighbor_k            : int, neighbours for tangent estimation
-    sor_k                 : int, SOR neighbour count
-    sor_std_multiplier    : float, SOR threshold
-    verbose               : bool
-
-    Returns
-    -------
-    result : dict with keys:
-        'original_inlier_points'    : ndarray (M, 3), SOR-filtered inlier points
-        'bezier_pts_axis1'          : ndarray (P, 3), Bezier fill from primary axis
-        'bezier_pts_axis2'          : ndarray (Q, 3), Bezier fill from secondary axis
-        'combined_bezier_pts'       : ndarray (P+Q, 3), vstacked axis1+axis2 fill points
-        'merged_points'             : ndarray (J, 3), merged (avg of near-duplicates)
-        'axis_1' / 'axis_2'         : str, primary and secondary axes used
-        'axis_3'                    : str, thickness (ignored) axis
-        'variances'                 : dict, variance per axis
-        'gaps_axis1' / 'gaps_axis2' : list, all detected gap pairs
-        'inlier_mask'               : ndarray, SOR mask (True = kept)
-        'num_filled'                : int, total generated fill points
-        'avg_point_spacing'         : float, auto-tuned spacing estimate
-        'slice_thickness'           : float, effective slice thickness used
-        'gap_threshold'             : float, effective gap threshold used
+    Complete hole-filling pipeline with PCA alignment for robust detection.
     """
     pts = np.asarray(points, dtype=np.float64)
 
-    # ---- Step 0: SOR ----
+    # ---- Step 0: PCA Alignment ----
     if verbose:
-        print(f"[SOR] Input: {len(pts)} points")
-    inlier_mask = statistical_outlier_removal(pts, k=sor_k, std_multiplier=sor_std_multiplier)
-    pts_clean   = pts[inlier_mask]
+        print("[PCA] Aligning point cloud to principal axes...")
+    pts_pca, rotation_matrix, mean_pt = pca_align(pts)
+
+    # ---- Step 1: SOR in PCA Space ----
+    if verbose:
+        print(f"[SOR] Input: {len(pts_pca)} points")
+    inlier_mask = statistical_outlier_removal(pts_pca, k=sor_k, std_multiplier=sor_std_multiplier)
+    pts_clean   = pts_pca[inlier_mask]
     if verbose:
         print(f"[SOR] After outlier removal: {len(pts_clean)} points  "
-              f"({len(pts_clean)/len(pts)*100:.1f}%)")
+              f"({len(pts_clean)/len(pts_pca)*100:.1f}%)")
 
     # ---- Auto-Tuning: KDTree-based avg_point_spacing ----
-    # Build cKDTree on inlier cloud; query k=2 (self + 1st NN), take 2nd distance
     if verbose:
         print("[AutoTune] Computing avg_point_spacing via cKDTree (k=2) ...")
     ckdtree = cKDTree(pts_clean)
@@ -397,80 +415,65 @@ def process_point_cloud(points,
 
     if slice_thickness is None:
         slice_thickness = avg_point_spacing * 2.0
-        if verbose:
-            print(f"[AutoTune] slice_thickness=None  →  set to {slice_thickness:.6f}  "
-                  f"(= avg_point_spacing × 2)")
-    else:
-        if verbose:
-            print(f"[AutoTune] slice_thickness={slice_thickness:.6f}  (user-provided)")
-
     if gap_threshold is None:
         gap_threshold = avg_point_spacing * 5.0
-        if verbose:
-            print(f"[AutoTune] gap_threshold=None  →  set to {gap_threshold:.6f}  "
-                  f"(= avg_point_spacing × 5)")
-    else:
-        if verbose:
-            print(f"[AutoTune] gap_threshold={gap_threshold:.6f}  (user-provided)")
 
-    # ---- Step 1: Axis selection ----
-    axis_1, axis_2, axis_3, variances = compute_variance_along_axes(pts_clean)
-    if verbose:
-        print(f"[Axis] Variance: X={variances['X']:.6f}  "
-              f"Y={variances['Y']:.6f}  Z={variances['Z']:.6f}")
-        print(f"[Axis] Primary={axis_1}  Secondary={axis_2}  "
-              f"Thickness(ignored)={axis_3}")
+    # In PCA space, the primary/secondary/thickness axes are 0, 1, 2 (X, Y, Z)
+    axis_1, axis_2, axis_3 = 'X', 'Y', 'Z'
 
     # ---- Step 2: Gap detection – Axis 1 ----
     if verbose:
-        print(f"[Axis1] Processing {axis_1}-axis slicing ...")
+        print(f"[Axis1] Processing {axis_1}-axis slicing (PCA Space) ...")
     gaps_axis1 = process_axis(pts_clean, axis_1, slice_thickness, gap_threshold)
-    if verbose:
-        print(f"[Axis1] Detected {len(gaps_axis1)} gap pairs")
 
     # ---- Step 2: Gap detection – Axis 2 ----
     if verbose:
-        print(f"[Axis2] Processing {axis_2}-axis slicing ...")
+        print(f"[Axis2] Processing {axis_2}-axis slicing (PCA Space) ...")
     gaps_axis2 = process_axis(pts_clean, axis_2, slice_thickness, gap_threshold)
-    if verbose:
-        print(f"[Axis2] Detected {len(gaps_axis2)} gap pairs")
 
     # ---- Step 3: Bezier fill ----
     if verbose:
-        print(f"[Bezier] Filling gaps ...")
-    bezier_pts_1 = fill_all_gaps(pts_clean, gaps_axis1,
-                                 num_points_per_gap=num_points_per_gap,
-                                 neighbor_k=neighbor_k)
-    bezier_pts_2 = fill_all_gaps(pts_clean, gaps_axis2,
-                                 num_points_per_gap=num_points_per_gap,
-                                 neighbor_k=neighbor_k)
-    bezier_all   = np.vstack([bezier_pts_1, bezier_pts_2]) if len(bezier_pts_1) or len(bezier_pts_2) else np.empty((0,3))
+        print(f"[Bezier] Filling gaps in PCA space ...")
+    bezier_pts_1_pca = fill_all_gaps(pts_clean, gaps_axis1,
+                                     num_points_per_gap=num_points_per_gap,
+                                     neighbor_k=neighbor_k)
+    bezier_pts_2_pca = fill_all_gaps(pts_clean, gaps_axis2,
+                                     num_points_per_gap=num_points_per_gap,
+                                     neighbor_k=neighbor_k)
+    
+    # ---- Step 4: Inverse Transform back to Original Space ----
+    if verbose:
+        print("[PCA] Mapping results back to original coordinate system...")
+    
+    pts_clean_orig = apply_inverse_pca(pts_clean, rotation_matrix, mean_pt)
+    
+    bezier_pts_1_orig = apply_inverse_pca(bezier_pts_1_pca, rotation_matrix, mean_pt) if len(bezier_pts_1_pca) > 0 else np.empty((0,3))
+    bezier_pts_2_orig = apply_inverse_pca(bezier_pts_2_pca, rotation_matrix, mean_pt) if len(bezier_pts_2_pca) > 0 else np.empty((0,3))
+    
+    bezier_all_orig = np.vstack([bezier_pts_1_orig, bezier_pts_2_orig]) if len(bezier_pts_1_orig) or len(bezier_pts_2_orig) else np.empty((0,3))
+
+    # Merge in original space with a dynamic merge distance based on average spacing
+    merge_dist = avg_point_spacing * 0.2
+    merged_orig = merge_and_average_points(pts_clean_orig, bezier_all_orig, merge_distance=merge_dist)
 
     if verbose:
-        print(f"[Bezier] Generated {len(bezier_all)} fill points "
-              f"({len(bezier_pts_1)} from {axis_1}-axis, "
-              f"{len(bezier_pts_2)} from {axis_2}-axis)")
-
-    # ---- Step 4: Merge / average ----
-    merged = merge_and_average_points(pts_clean, bezier_all)
-
-    if verbose:
-        print(f"[Merge] Final point count: {len(merged)}")
+        print(f"[Merge] merge_distance={merge_dist:.6f}")
+        print(f"[Merge] Final point count: {len(merged_orig)}")
 
     return {
-        'original_inlier_points': pts_clean,
-        'bezier_pts_axis1': bezier_pts_1,
-        'bezier_pts_axis2': bezier_pts_2,
-        'combined_bezier_pts': bezier_all,
-        'merged_points': merged,
+        'original_inlier_points': pts_clean_orig,
+        'bezier_pts_axis1': bezier_pts_1_orig,
+        'bezier_pts_axis2': bezier_pts_2_orig,
+        'combined_bezier_pts': bezier_all_orig,
+        'merged_points': merged_orig,
         'axis_1': axis_1,
         'axis_2': axis_2,
         'axis_3': axis_3,
-        'variances': variances,
+        'variances': {'PCA_X': 0, 'PCA_Y': 0, 'PCA_Z': 0}, # Placeholders
         'gaps_axis1': gaps_axis1,
         'gaps_axis2': gaps_axis2,
         'inlier_mask': inlier_mask,
-        'num_filled': len(bezier_all),
+        'num_filled': len(bezier_all_orig),
         'avg_point_spacing': avg_point_spacing,
         'slice_thickness': slice_thickness,
         'gap_threshold': gap_threshold,
