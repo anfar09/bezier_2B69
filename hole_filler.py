@@ -227,46 +227,158 @@ def process_axis(points, primary_axis, slice_thickness, gap_threshold):
     return all_gap_pairs_3d
 
 
-# =============================================================================
-# 4. CUBIC BEZIER CURVE FILLING
-# =============================================================================
-
-def compute_tangent_from_neighbors(point, neighbors, strength=0.5):
+def compute_slope_vector(point, neighbors, opposite_point=None):
     """
-    Estimate surface tangent at `point` from its neighbours.
-    Tangent is a weighted average of vectors from point to neighbours,
-    weighted by 1/distance.  Strength scales the magnitude.
+    Compute the surface slope direction at a gap boundary point.
+    
+    Algorithm:
+    1. Filter neighbors to only those "behind" the boundary (surface side).
+    2. Fit a line: direction from centroid of behind-neighbors through the
+       boundary point, pointing into the gap.
+    
+    Parameters
+    ----------
+    point          : (3,) boundary point at the edge of the gap
+    neighbors      : (N, 3) nearby points
+    opposite_point : (3,) boundary point on the OTHER side of the gap
+    
+    Returns
+    -------
+    (3,) unit vector pointing from surface into the gap
     """
     if len(neighbors) == 0:
         return np.zeros(3)
 
-    vectors = neighbors - point          # (N, 3)
-    dists   = np.linalg.norm(vectors, axis=1)
-    dists[dists < 1e-10] = 1e-10           # avoid div-by-zero
-    weights = 1.0 / dists
-    weights /= weights.sum()
+    # Filter to "behind" neighbors (surface side, away from gap)
+    filtered = neighbors
+    if opposite_point is not None:
+        gap_dir = opposite_point - point
+        gap_norm = np.linalg.norm(gap_dir)
+        if gap_norm > 1e-12:
+            gap_unit = gap_dir / gap_norm
+            dots = (neighbors - point) @ gap_unit
+            behind = neighbors[dots < 0]
+            if len(behind) >= 2:
+                filtered = behind
 
-    tangent = np.dot(weights, vectors) * strength
-    return tangent
+    # Direction: centroid of behind-neighbors → boundary point → into gap
+    centroid = np.mean(filtered, axis=0)
+    direction = point - centroid
+    dir_norm = np.linalg.norm(direction)
+    if dir_norm < 1e-12:
+        # Fallback: just point toward opposite
+        if opposite_point is not None:
+            direction = opposite_point - point
+            dir_norm = np.linalg.norm(direction)
+            if dir_norm < 1e-12:
+                return np.zeros(3)
+        else:
+            return np.zeros(3)
+    
+    return direction / dir_norm
+
+
+# Backward-compatible wrapper (used in app.py visualization)
+def compute_tangent_from_neighbors(point, neighbors, gap_length=None, strength=0.33, opposite_point=None):
+    """Returns a scaled tangent vector for visualization."""
+    unit_dir = compute_slope_vector(point, neighbors, opposite_point=opposite_point)
+    if gap_length is not None and gap_length > 0:
+        return unit_dir * (strength * gap_length)
+    return unit_dir * strength
+
+
+def find_apex_point(p_left, v_left, p_right, v_right):
+    """
+    Triangulation: find the apex point p_c where two rays intersect.
+    
+    Ray 1: p_left  + t * v_left
+    Ray 2: p_right + s * v_right
+    
+    In 3D, rays rarely intersect exactly. We find the midpoint of the
+    shortest segment connecting the two rays (closest approach).
+    
+    The apex is clamped to at most 50% of the gap distance from the
+    midpoint to prevent extreme curvature.
+    
+    Parameters
+    ----------
+    p_left  : (3,) left boundary point
+    v_left  : (3,) slope direction at left (unit vector)
+    p_right : (3,) right boundary point
+    v_right : (3,) slope direction at right (unit vector)
+    
+    Returns
+    -------
+    p_c : (3,) apex point
+    """
+    w0 = p_left - p_right
+    a = float(np.dot(v_left, v_left))
+    b = float(np.dot(v_left, v_right))
+    c = float(np.dot(v_right, v_right))
+    d = float(np.dot(v_left, w0))
+    e = float(np.dot(v_right, w0))
+    
+    denom = a * c - b * b
+    
+    gap_vec = p_right - p_left
+    gap_length = float(np.linalg.norm(gap_vec))
+    midpoint = (p_left + p_right) / 2.0
+    
+    if abs(denom) < 1e-12:
+        # Rays are parallel — fallback: midpoint raised perpendicular
+        perp = np.cross(gap_vec, v_left)
+        perp_norm = np.linalg.norm(perp)
+        if perp_norm > 1e-12:
+            perp = perp / perp_norm
+            return midpoint + perp * (gap_length * 0.3)
+        else:
+            return midpoint
+    
+    t_param = (b * e - c * d) / denom
+    s_param = (a * e - b * d) / denom
+    
+    # Ensure rays go "forward" (positive parameters only)
+    t_param = max(t_param, 0.0)
+    s_param = max(s_param, 0.0)
+    
+    closest_on_ray1 = p_left + t_param * v_left
+    closest_on_ray2 = p_right + s_param * v_right
+    
+    # Apex = midpoint between the two closest points
+    p_c = (closest_on_ray1 + closest_on_ray2) / 2.0
+    
+    # CLAMP: limit apex distance to max 50% of gap distance
+    apex_offset = np.linalg.norm(p_c - midpoint)
+    max_offset = gap_length * 0.5
+    if apex_offset > max_offset and apex_offset > 1e-12:
+        p_c = midpoint + (p_c - midpoint) * (max_offset / apex_offset)
+    
+    return p_c
 
 
 def cubic_bezier_fill_gap(p_left, p_right, num_points=20, neighbors_left=None, neighbors_right=None):
     """
     Fill a gap between p_left and p_right with a cubic Bezier curve.
-
-    Control points:
-        P0 = p_left
-        P1 = p_left + tangent_left
-        P2 = p_right - tangent_right
-        P3 = p_right
-
+    
+    Algorithm (from research poster):
+    
+    Step 1 — Triangulation:
+        Compute slope vectors v_l, v_r from neighbours at each boundary.
+        Find apex point p_c where the two rays intersect (triangulation).
+    
+    Step 2 — Control Point Calculation (1:2 ratio):
+        P1 = (2/3) * p_c + (1/3) * p_left
+        P2 = (1/3) * p_c + (2/3) * p_right
+    
+    Bezier curve:  B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
+    
     Parameters
     ----------
     p_left, p_right : array-like (3,)
     num_points      : int, number of interpolated points
-    neighbors_left  : array (N, 3), local neighbourhood for tangent estimation
-    neighbors_right : array (N, 3), local neighbourhood for tangent estimation
-
+    neighbors_left  : array (N, 3)
+    neighbors_right : array (N, 3)
+    
     Returns
     -------
     curve_pts : ndarray (num_points, 3)
@@ -274,27 +386,34 @@ def cubic_bezier_fill_gap(p_left, p_right, num_points=20, neighbors_left=None, n
     p_left  = np.asarray(p_left,  dtype=np.float64)
     p_right = np.asarray(p_right, dtype=np.float64)
 
-    # Compute tangents
-    t_left  = compute_tangent_from_neighbors(p_left, neighbors_left  if neighbors_left  is not None else np.empty((0,3)))
-    t_right = compute_tangent_from_neighbors(p_right, neighbors_right if neighbors_right is not None else np.empty((0,3)))
+    # Step 1: Compute slope vectors (direction from surface into gap)
+    v_left = compute_slope_vector(
+        p_left,
+        neighbors_left if neighbors_left is not None else np.empty((0, 3)),
+        opposite_point=p_right
+    )
+    v_right = compute_slope_vector(
+        p_right,
+        neighbors_right if neighbors_right is not None else np.empty((0, 3)),
+        opposite_point=p_left
+    )
 
-    # Control points
+    # Step 1: Triangulation — find apex point p_c
+    p_c = find_apex_point(p_left, v_left, p_right, v_right)
+
+    # Step 2: Control points with 1:2 ratio
     P0 = p_left
-    P1 = p_left + t_left
-    P2 = p_right - t_right
+    P1 = (2.0 / 3.0) * p_c + (1.0 / 3.0) * p_left    # closer to apex
+    P2 = (1.0 / 3.0) * p_c + (2.0 / 3.0) * p_right   # closer to boundary
     P3 = p_right
 
-    # Bernstein polynomials B(t) = (1-t)^3 .. (1-t)^2*t .. (1-t)*t^2 .. t^3
+    # Bezier curve: B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
     t_vals = np.linspace(0.0, 1.0, num_points)
     curve_pts = np.zeros((num_points, 3), dtype=np.float64)
 
     for i, t in enumerate(t_vals):
         u = 1.0 - t
-        b0 = u**3
-        b1 = 3 * u**2 * t
-        b2 = 3 * u * t**2
-        b3 = t**3
-        curve_pts[i] = b0*P0 + b1*P1 + b2*P2 + b3*P3
+        curve_pts[i] = u**3*P0 + 3*u**2*t*P1 + 3*u*t**2*P2 + t**3*P3
 
     return curve_pts
 
@@ -384,27 +503,59 @@ def process_point_cloud(points,
                         neighbor_k=5,
                         sor_k=10,
                         sor_std_multiplier=2.0,
+                        use_sor=True,
+                        use_pca=True,
+                        use_cross_hatch=True,
+                        fill_method='bezier',
                         verbose=True):
     """
     Complete hole-filling pipeline with PCA alignment for robust detection.
+
+    Ablation parameters
+    -------------------
+    use_sor        : bool — enable Statistical Outlier Removal
+    use_pca        : bool — enable PCA alignment
+    use_cross_hatch: bool — if False, only use primary axis (no dual-axis)
+    fill_method    : str  — 'bezier', 'linear', 'bspline', 'nearest'
     """
+    import time as _time
+    timings = {}
+
     pts = np.asarray(points, dtype=np.float64)
 
     # ---- Step 0: PCA Alignment ----
-    if verbose:
-        print("[PCA] Aligning point cloud to principal axes...")
-    pts_pca, rotation_matrix, mean_pt = pca_align(pts)
+    t0 = _time.perf_counter()
+    if use_pca:
+        if verbose:
+            print("[PCA] Aligning point cloud to principal axes...")
+        pts_pca, rotation_matrix, mean_pt = pca_align(pts)
+    else:
+        if verbose:
+            print("[PCA] SKIPPED (ablation)")
+        pts_pca = pts.copy()
+        rotation_matrix = np.eye(3)
+        mean_pt = np.zeros(3)
+    timings['pca'] = _time.perf_counter() - t0
 
     # ---- Step 1: SOR in PCA Space ----
-    if verbose:
-        print(f"[SOR] Input: {len(pts_pca)} points")
-    inlier_mask = statistical_outlier_removal(pts_pca, k=sor_k, std_multiplier=sor_std_multiplier)
-    pts_clean   = pts_pca[inlier_mask]
-    if verbose:
-        print(f"[SOR] After outlier removal: {len(pts_clean)} points  "
-              f"({len(pts_clean)/len(pts_pca)*100:.1f}%)")
+    t0 = _time.perf_counter()
+    if use_sor:
+        if verbose:
+            print(f"[SOR] Input: {len(pts_pca)} points")
+        inlier_mask = statistical_outlier_removal(pts_pca, k=sor_k, std_multiplier=sor_std_multiplier)
+        pts_clean   = pts_pca[inlier_mask]
+        if verbose:
+            print(f"[SOR] After outlier removal: {len(pts_clean)} points  "
+                  f"({len(pts_clean)/len(pts_pca)*100:.1f}%)")
+    else:
+        if verbose:
+            print("[SOR] SKIPPED (ablation)")
+        inlier_mask = np.ones(len(pts_pca), dtype=bool)
+        pts_clean = pts_pca
+    timings['sor'] = _time.perf_counter() - t0
 
     # ---- Auto-Tuning: KDTree-based avg_point_spacing ----
+    t0 = _time.perf_counter()
     if verbose:
         print("[AutoTune] Computing avg_point_spacing via cKDTree (k=2) ...")
     ckdtree = cKDTree(pts_clean)
@@ -417,46 +568,69 @@ def process_point_cloud(points,
         slice_thickness = avg_point_spacing * 2.0
     if gap_threshold is None:
         gap_threshold = avg_point_spacing * 5.0
+    timings['auto_tune'] = _time.perf_counter() - t0
 
     # In PCA space, the primary/secondary/thickness axes are 0, 1, 2 (X, Y, Z)
     axis_1, axis_2, axis_3 = 'X', 'Y', 'Z'
 
-    # ---- Step 2: Gap detection – Axis 1 ----
+    # ---- Step 2: Gap detection ----
+    t0 = _time.perf_counter()
     if verbose:
         print(f"[Axis1] Processing {axis_1}-axis slicing (PCA Space) ...")
     gaps_axis1 = process_axis(pts_clean, axis_1, slice_thickness, gap_threshold)
 
-    # ---- Step 2: Gap detection – Axis 2 ----
-    if verbose:
-        print(f"[Axis2] Processing {axis_2}-axis slicing (PCA Space) ...")
-    gaps_axis2 = process_axis(pts_clean, axis_2, slice_thickness, gap_threshold)
+    if use_cross_hatch:
+        if verbose:
+            print(f"[Axis2] Processing {axis_2}-axis slicing (PCA Space) ...")
+        gaps_axis2 = process_axis(pts_clean, axis_2, slice_thickness, gap_threshold)
+    else:
+        if verbose:
+            print("[Axis2] SKIPPED (single-axis ablation)")
+        gaps_axis2 = []
+    timings['gap_detection'] = _time.perf_counter() - t0
 
-    # ---- Step 3: Bezier fill ----
-    if verbose:
-        print(f"[Bezier] Filling gaps in PCA space ...")
-    bezier_pts_1_pca = fill_all_gaps(pts_clean, gaps_axis1,
-                                     num_points_per_gap=num_points_per_gap,
-                                     neighbor_k=neighbor_k)
-    bezier_pts_2_pca = fill_all_gaps(pts_clean, gaps_axis2,
-                                     num_points_per_gap=num_points_per_gap,
-                                     neighbor_k=neighbor_k)
-    
+    # ---- Step 3: Fill gaps ----
+    t0 = _time.perf_counter()
+
+    # Select fill function based on fill_method
+    if fill_method == 'bezier':
+        fill_fn = fill_all_gaps
+        if verbose:
+            print(f"[Fill] Filling gaps with Cubic Bezier ...")
+    else:
+        from comparative import fill_all_gaps_with_method
+        if verbose:
+            print(f"[Fill] Filling gaps with method: {fill_method} ...")
+        fill_fn = lambda pts, gaps, **kw: fill_all_gaps_with_method(
+            pts, gaps, method=fill_method, **kw)
+
+    bezier_pts_1_pca = fill_fn(pts_clean, gaps_axis1,
+                               num_points_per_gap=num_points_per_gap,
+                               neighbor_k=neighbor_k)
+    if use_cross_hatch and gaps_axis2:
+        bezier_pts_2_pca = fill_fn(pts_clean, gaps_axis2,
+                                   num_points_per_gap=num_points_per_gap,
+                                   neighbor_k=neighbor_k)
+    else:
+        bezier_pts_2_pca = np.empty((0, 3))
+    timings['fill'] = _time.perf_counter() - t0
+
     # ---- Step 4: Inverse Transform back to Original Space ----
+    t0 = _time.perf_counter()
     if verbose:
         print("[PCA] Mapping results back to original coordinate system...")
-    
+
     pts_clean_orig = apply_inverse_pca(pts_clean, rotation_matrix, mean_pt)
-    
+
     bezier_pts_1_orig = apply_inverse_pca(bezier_pts_1_pca, rotation_matrix, mean_pt) if len(bezier_pts_1_pca) > 0 else np.empty((0,3))
     bezier_pts_2_orig = apply_inverse_pca(bezier_pts_2_pca, rotation_matrix, mean_pt) if len(bezier_pts_2_pca) > 0 else np.empty((0,3))
-    
+
     bezier_all_orig = np.vstack([bezier_pts_1_orig, bezier_pts_2_orig]) if len(bezier_pts_1_orig) or len(bezier_pts_2_orig) else np.empty((0,3))
 
     # Convert gap boundary points back to original space
     def get_boundary_pts_orig(gaps):
         if not gaps:
             return np.empty((0, 3))
-        # Each gap is (p_left, p_right, dist, axis_val)
         b_pts_pca = []
         for p_left, p_right, _, _ in gaps:
             b_pts_pca.append(p_left)
@@ -471,10 +645,13 @@ def process_point_cloud(points,
     # Merge in original space with a dynamic merge distance based on average spacing
     merge_dist = avg_point_spacing * 0.2
     merged_orig = merge_and_average_points(pts_clean_orig, bezier_all_orig, merge_distance=merge_dist)
+    timings['merge'] = _time.perf_counter() - t0
+    timings['total'] = sum(timings.values())
 
     if verbose:
         print(f"[Merge] merge_distance={merge_dist:.6f}")
         print(f"[Merge] Final point count: {len(merged_orig)}")
+        print(f"[Timing] {timings}")
 
     return {
         'original_inlier_points': pts_clean_orig,
@@ -488,7 +665,7 @@ def process_point_cloud(points,
         'axis_1': axis_1,
         'axis_2': axis_2,
         'axis_3': axis_3,
-        'variances': {'PCA_X': 0, 'PCA_Y': 0, 'PCA_Z': 0}, # Placeholders
+        'variances': {'PCA_X': 0, 'PCA_Y': 0, 'PCA_Z': 0},
         'gaps_axis1': gaps_axis1,
         'gaps_axis2': gaps_axis2,
         'inlier_mask': inlier_mask,
@@ -496,6 +673,11 @@ def process_point_cloud(points,
         'avg_point_spacing': avg_point_spacing,
         'slice_thickness': slice_thickness,
         'gap_threshold': gap_threshold,
+        'timings': timings,
+        'fill_method': fill_method,
+        'pts_clean_pca': pts_clean,
+        'rotation_matrix': rotation_matrix,
+        'mean_pt': mean_pt,
     }
 
 
@@ -516,6 +698,8 @@ if __name__ == '__main__':
     parser.add_argument('--neighbor_k',       type=int,   default=5)
     parser.add_argument('--sor_k',            type=int,   default=10)
     parser.add_argument('--sor_std',          type=float, default=2.0)
+    parser.add_argument('--fill_method',      type=str,   default='bezier',
+                        choices=['bezier', 'linear', 'bspline', 'nearest'])
     args = parser.parse_args()
 
     # Load points
@@ -530,9 +714,11 @@ if __name__ == '__main__':
         neighbor_k=args.neighbor_k,
         sor_k=args.sor_k,
         sor_std_multiplier=args.sor_std,
+        fill_method=args.fill_method,
     )
 
     # Save merged output
     out_path = args.output or (os.path.splitext(args.input)[0] + '_filled.xyz')
     np.savetxt(out_path, result['merged_points'], fmt='%.8f %.8f %.8f')
     print(f'Saved → {out_path}  ({len(result["merged_points"])} points)')
+
