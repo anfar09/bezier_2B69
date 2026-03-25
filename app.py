@@ -4,262 +4,328 @@ import numpy as np
 import os
 import pandas as pd
 import io
+import time
 
 from slicer import load_points_from_file, get_bounds
 from hole_filler import process_point_cloud
 
-st.set_page_config(layout="wide")
-st.title("🔬 3D Point Cloud + Hole Detection & Filling")
+# --- Page Config ---
+st.set_page_config(
+    page_title="3D Point Cloud Reconstruction",
+    page_icon="🎨",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# ============================================================
-# Initialise session-state keys on first run
-# ============================================================
-if "hf_result" not in st.session_state:
-    st.session_state["hf_result"] = None
-if "hf_file" not in st.session_state:
-    st.session_state["hf_file"]   = None
+# --- Soft & Professional Light Theme CSS ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&family=Inter:wght@300;400;600&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', 'Sarabun', sans-serif;
+    }
+    
+    .main {
+        background-color: #F8FAFC;
+        color: #1E293B;
+    }
+    
+    /* Soft Professional Palette: Sage, Slate, and Sky Blue */
+    :root {
+        --primary-soft: #3B82F6;
+        --secondary-soft: #10B981;
+        --bg-card: #FFFFFF;
+        --text-main: #334155;
+        --border-color: #E2E8F0;
+    }
 
-# ============================================================
-# Tabs
-# ============================================================
-tab1, tab2, tab3 = st.tabs(["3D View", "Hole Detecter", "Hole Filling"])
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+        background-color: transparent;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        background-color: #FFFFFF;
+        border-radius: 12px 12px 0px 0px;
+        padding: 0px 30px;
+        color: #64748B;
+        border: 1px solid var(--border-color);
+        transition: all 0.2s ease;
+        font-weight: 500;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #EFF6FF !important;
+        color: var(--primary-soft) !important;
+        border-bottom: 3px solid var(--primary-soft) !important;
+        box-shadow: 0px 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }
 
-# ============================================================
-# TAB 1 – Original 3D viewer
-# ============================================================
-with tab1:
-    DATASET_FOLDER = "Dataset"
-    os.makedirs(DATASET_FOLDER, exist_ok=True)
+    .presentation-title {
+        font-size: 2.8rem;
+        font-weight: 700;
+        color: #0F172A;
+        margin-bottom: 0;
+        letter-spacing: -1px;
+    }
+    
+    .step-header {
+        font-size: 1.4rem;
+        color: #1E293B;
+        border-left: 5px solid var(--primary-soft);
+        padding-left: 15px;
+        margin-top: 25px;
+        margin-bottom: 15px;
+        font-weight: 600;
+    }
 
-    files = [f for f in os.listdir(DATASET_FOLDER)
-             if f.endswith(('.txt', '.xyz', '.csv', '.pts'))]
+    .methodology-card {
+        background-color: #FFFFFF;
+        padding: 24px;
+        border-radius: 16px;
+        border: 1px solid var(--border-color);
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+        margin-bottom: 20px;
+    }
 
-    if not files:
-        st.error("ใส่ไฟล์ใน Dataset ก่อน")
-    else:
-        file = st.selectbox("เลือกไฟล์", files)
-        path = os.path.join(DATASET_FOLDER, file)
+    .stMetric {
+        background-color: #FFFFFF;
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid var(--border-color);
+        box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+    }
+    
+    .stButton>button {
+        background: white;
+        color: var(--primary-soft);
+        border: 2px solid var(--primary-soft);
+        padding: 8px 24px;
+        border-radius: 10px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton>button:hover {
+        background: var(--primary-soft);
+        color: white;
+        box-shadow: 0 10px 15px -3px rgba(59, 130, 246, 0.3);
+    }
 
-        @st.cache_data
-        def load(fp):
-            return load_points_from_file(fp)
+    /* Info boxes styling */
+    .stAlert {
+        border-radius: 12px;
+        border: none;
+        background-color: #F1F5F9;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-        points = np.array(load(path))
-        bounds  = get_bounds(points)
+# --- Data Loading ---
+DATASET_FOLDER = "Dataset"
+os.makedirs(DATASET_FOLDER, exist_ok=True)
+db_files = sorted([f for f in os.listdir(DATASET_FOLDER) if f.endswith(('.xyz', '.txt', '.pts'))])
 
-        col1, col2 = st.columns([3, 1])
+if "hf_result" not in st.session_state: st.session_state["hf_result"] = None
+if "hf_file" not in st.session_state: st.session_state["hf_file"] = None
 
-        with col2:
-            size  = st.slider("Point size", 1, 10, 2)
-            axis  = st.selectbox("Axis", ["X", "Y", "Z"])
-            fixed = st.checkbox("Fixed Mode")
+# --- Header ---
+col_t1, col_t2 = st.columns([3, 1])
+with col_t1:
+    st.markdown('<p class="presentation-title">3D Reconstruction Analysis</p>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#64748B; font-size:1.1rem; font-weight:400;">การเติมเต็มพื้นผิวและซ่อมแซมรูโหว่ด้วยอัลกอริทึม Bezier Cross-Hatching</p>', unsafe_allow_html=True)
 
-            r = bounds[axis.lower()][1] - bounds[axis.lower()][0]
-            r = max(r, 1e-6)
-
-            w = st.number_input("Slice width", min_value=r/100,
-                                value=max(r/5, r/100), step=r/100)
-
-            n = int(np.ceil(r/w))
-
-            if fixed:
-                idx_slice = st.slider("Slice", 0, max(n-1, 0), 0)
-
-        with col1:
-            fig = go.Figure()
-
-            axis_map = {"X": 0, "Y": 1, "Z": 2}
-            idx = axis_map[axis]
-
-            xmin, xmax = bounds['x']
-            ymin, ymax = bounds['y']
-            zmin, zmax = bounds['z']
-
-            def draw_box(cur, nxt, color='red'):
-                if axis == "X":
-                    xs, ys, zs = [cur, nxt], [ymin, ymax], [zmin, zmax]
-                elif axis == "Y":
-                    xs, ys, zs = [xmin, xmax], [cur, nxt], [zmin, zmax]
-                else:
-                    xs, ys, zs = [xmin, xmax], [ymin, ymax], [cur, nxt]
-
-                edges = [
-                    ([xs[0], xs[1]], [ys[0], ys[0]], [zs[0], zs[0]]),
-                    ([xs[0], xs[1]], [ys[1], ys[1]], [zs[0], zs[0]]),
-                ]
-                for ex, ey, ez in edges:
-                    fig.add_trace(go.Scatter3d(x=ex, y=ey, z=ez, mode='lines',
-                                              line=dict(color=color, width=4),
-                                              showlegend=False))
-
-            if fixed:
-                cur = bounds[axis.lower()][0] + idx_slice * w
-                nxt = min(cur + w, bounds[axis.lower()][1])
-
-                mask = (points[:, idx] >= cur) & (points[:, idx] < nxt)
-
-                pts_in  = points[mask]
-                pts_out = points[~mask]
-
-                fig.add_trace(go.Scatter3d(
-                    x=pts_out[:, 0], y=pts_out[:, 1], z=pts_out[:, 2],
-                    mode='markers', marker=dict(size=size, color='gray', opacity=0.05)
-                ))
-                fig.add_trace(go.Scatter3d(
-                    x=pts_in[:, 0], y=pts_in[:, 1], z=pts_in[:, 2],
-                    mode='markers', marker=dict(size=size+1, color='red')
-                ))
-                draw_box(cur, nxt, 'yellow')
-            else:
-                fig.add_trace(go.Scatter3d(
-                    x=points[:, 0], y=points[:, 1], z=points[:, 2],
-                    mode='markers',
-                    marker=dict(size=size, color=points[:, 2], colorscale='Viridis')
-                ))
-
-            st.plotly_chart(fig, use_container_width=True)
-
-
-# ============================================================
-# TAB 2 – Hole Detecter (Configuration & Boundary Visualization)
-# ============================================================
-with tab2:
-    st.subheader("📁 Select Point Cloud")
-    DB_FOLDER = "Dataset"
-    os.makedirs(DB_FOLDER, exist_ok=True)
-
-    db_files = sorted([
-        f for f in os.listdir(DB_FOLDER)
-        if f.endswith(('.xyz', '.txt', '.pts'))
-    ])
-
-    if not db_files:
-        st.error(f"No `.xyz` files found in the `{DB_FOLDER}/` folder.")
-        st.stop()
-
-    selected_file = st.selectbox("Choose a file from Dataset/", db_files, key="hf_file_select")
-    file_path = os.path.join(DB_FOLDER, selected_file)
-
+with col_t2:
+    selected_file = st.selectbox("เลือกข้อมูลที่ต้องการนำเสนอ", db_files, label_visibility="collapsed")
+    file_path = os.path.join(DATASET_FOLDER, selected_file)
+    
     @st.cache_data
-    def load_points_for_hf(fp):
-        return np.array(load_points_from_file(fp))
-
-    points_raw = load_points_for_hf(file_path)
-    st.info(f"**{len(points_raw)}** raw points loaded.")
-
-    st.subheader("⚙️ Hyperparameters")
-    col_slice, col_gap = st.columns(2)
-    with col_slice:
-        st.markdown("**slice_thickness** (auto if empty)")
-        slice_text = st.text_input("slice_thickness", value="", placeholder="auto", key="st_in")
-        slice_thickness = float(slice_text) if slice_text.strip() else None
-    with col_gap:
-        st.markdown("**gap_threshold** (auto if empty)")
-        gap_text = st.text_input("gap_threshold", value="", placeholder="auto", key="gt_in")
-        gap_threshold = float(gap_text) if gap_text.strip() else None
-
-    col_np, col_nk = st.columns(2)
-    with col_np:
-        num_points = st.number_input("num_points_per_gap", min_value=3, max_value=100, value=20, key="np_in")
-    with col_nk:
-        neighbor_k = st.slider("neighbor_k", min_value=2, max_value=30, value=10, key="nk_in")
-
-    run = st.button("🚀 Run Detection", type="primary")
-
-    if run:
-        with st.spinner("Detecting holes..."):
-            result = process_point_cloud(
-                points_raw,
-                slice_thickness=slice_thickness,
-                gap_threshold=gap_threshold,
-                num_points_per_gap=num_points,
-                neighbor_k=neighbor_k,
-                verbose=False,
-            )
-        st.session_state["hf_result"] = result
+    def load_data(fp): return np.array(load_points_from_file(fp))
+    
+    if st.session_state["hf_file"] != selected_file:
+        st.session_state["points_raw"] = load_data(file_path)
         st.session_state["hf_file"] = selected_file
+        st.session_state["hf_result"] = None
+    
+    points_raw = st.session_state["points_raw"]
 
-    result = st.session_state.get("hf_result")
-    if result is not None:
-        original_pts = result['original_inlier_points']
-        boundary_pts = result['combined_boundary_pts']
+st.markdown("<br>", unsafe_allow_html=True)
+
+tab_intro, tab_analysis, tab_result = st.tabs([
+    "📍 01. บทนำและข้อมูลดิบ", 
+    "⚙️ 02. ขั้นตอนการประมวลผล", 
+    "💎 03. ผลลัพธ์และการฟื้นฟูพื้นผิว"
+])
+
+# --- TAB 1: INTRODUCTION ---
+with tab_intro:
+    col_l, col_r = st.columns([1, 2])
+    
+    with col_l:
+        st.markdown('<p class="step-header">ภาพรวมของโครงการ</p>', unsafe_allow_html=True)
+        st.write("""
+        การซ่อมแซมพื้นผิว 3 มิติ (3D Surface Repair) เป็นส่วนสำคัญในงานอุตสาหกรรมสมัยใหม่ 
+        ช่วยให้เราสามารถกู้คืนโมเดลที่เสียหายจากการสแกน หรือเพิ่มความละเอียดของโมเดลได้
         
-        st.subheader("🌀 Hole Boundary Visualization")
-        fig = go.Figure()
-        if len(original_pts) > 0:
-            fig.add_trace(go.Scatter3d(
-                x=original_pts[:, 0], y=original_pts[:, 1], z=original_pts[:, 2],
-                mode='markers',
-                marker=dict(size=2, color='#4A90D9', opacity=0.3, line=dict(width=0)),
-                name='Inliers',
-            ))
-        if len(boundary_pts) > 0:
-            fig.add_trace(go.Scatter3d(
-                x=boundary_pts[:, 0], y=boundary_pts[:, 1], z=boundary_pts[:, 2],
-                mode='markers',
-                marker=dict(size=5, color='red', opacity=1.0, line=dict(width=1, color='white')),
-                name=f'Hole Boundaries ({len(boundary_pts)})',
-            ))
-        fig.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+        **หัวข้อหลักในการนำเสนอ:**
+        - **Data Cleaning:** การลบจุดรบกวน (Noise)
+        - **Geometric Alignment:** การจัดวางโมเดลตามแกนหลัก (PCA)
+        - **Surface Generation:** การสร้างพื้นผิวใหม่ด้วย Cross-Hatching
+        """)
+        
+        st.markdown('<p class="step-header">ตั้งค่าการแสดงผล</p>', unsafe_allow_html=True)
+        p_size = st.slider("ขนาดจุด (Point Size)", 1.0, 5.0, 2.0)
+        p_color = st.selectbox("โทนสี (Color Palette)", ["Blues", "Greens", "Viridis", "Cividis"])
 
-
-# ============================================================
-# TAB 3 – Hole Filling (Results & Export)
-# ============================================================
-with tab3:
-    result = st.session_state.get("hf_result")
-    file_name = st.session_state.get("hf_file", "cloud")
-
-    if result is not None:
-        original_pts    = result['original_inlier_points']
-        bezier_pts_1    = result['bezier_pts_axis1']
-        bezier_pts_2    = result['bezier_pts_axis2']
-        combined_bezier = result['combined_bezier_pts']
-        merged          = result['merged_points']
-        axis_1_name     = result['axis_1']
-        axis_2_name     = result['axis_2']
-        num_gaps        = len(result['gaps_axis1']) + len(result['gaps_axis2'])
-
-        st.subheader("📊 Results")
-        ca, cb, cc, cd = st.columns(4)
-        ca.metric("Inliers", f"{len(original_pts)}")
-        cb.metric("Gap pairs", f"{num_gaps}")
-        cc.metric("Fill points", f"{result['num_filled']}")
-        cd.metric("Final points", f"{len(merged)}")
-
-        st.subheader("🌀 Filling Visualization")
-        axis1_label = f"{axis_1_name}-Axis Fill"
-        axis2_label = f"{axis_2_name}-Axis Fill"
-        mesh_label  = "Full Cross-Hatched"
-
-        viz_mode = st.radio("Fill Mode", options=[axis1_label, axis2_label, mesh_label], horizontal=True)
-
-        active_bezier = combined_bezier
-        if viz_mode == axis1_label: active_bezier = bezier_pts_1
-        elif viz_mode == axis2_label: active_bezier = bezier_pts_2
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter3d(
-            x=original_pts[:, 0], y=original_pts[:, 1], z=original_pts[:, 2],
-            mode='markers', marker=dict(size=2, color='#4A90D9', opacity=0.3), name='Inliers'
-        ))
-        if len(active_bezier) > 0:
-            fig.add_trace(go.Scatter3d(
-                x=active_bezier[:, 0], y=active_bezier[:, 1], z=active_bezier[:, 2],
-                mode='markers', marker=dict(size=3, color='#39FF14', opacity=1.0), name='Bezier Fill'
-            ))
-        fig.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("💾 Export")
-        out_buf = io.StringIO()
-        np.savetxt(out_buf, merged, fmt='%.8f %.8f %.8f')
-        st.download_button(
-            "Download merged .xyz",
-            data=out_buf.getvalue(),
-            file_name=file_name.rsplit('.', 1)[0] + '_filled.xyz',
-            mime='text/plain',
+    with col_r:
+        fig1 = go.Figure(data=[go.Scatter3d(
+            x=points_raw[:, 0], y=points_raw[:, 1], z=points_raw[:, 2],
+            mode='markers',
+            marker=dict(size=p_size, color=points_raw[:, 2], colorscale=p_color, opacity=0.6),
+            name="Raw Input"
+        )])
+        fig1.update_layout(
+            scene=dict(
+                aspectmode='data', 
+                xaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white'),
+                yaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white'),
+                zaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white')
+            ),
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="white",
+            height=600
         )
+        st.plotly_chart(fig1, use_container_width=True)
+
+# --- TAB 2: METHODOLOGY ---
+with tab_analysis:
+    col_m, col_p = st.columns([1, 2])
+    
+    with col_m:
+        st.markdown('<p class="step-header">Methodology</p>', unsafe_allow_html=True)
+        st.write("ขั้นตอนการวิเคราะห์จุดที่ขาดหายไป")
+        
+        st.markdown("""
+        <div class="methodology-card">
+        <b>1. Statistical Removal (SOR)</b><br>
+        กรองจุดที่ลอยอยู่อย่างอิสระซึ่งไม่ใช่ส่วนของพื้นผิวจริง
+        </div>
+        <div class="methodology-card">
+        <b>2. Axis Alignment (PCA)</b><br>
+        คำนวณ Variance เพื่อหาแกนที่วัตถุแผ่ขยายมากที่สุด
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("### ⚙️ ปรับแต่งพารามิเตอร์")
+        s_th = st.text_input("Slice Thickness", placeholder="Auto (แนะนำ)", key="s_th_soft")
+        g_th = st.text_input("Gap Threshold", placeholder="Auto (แนะนำ)", key="g_th_soft")
+        
+        if st.button("🔍 เริ่มการประมวลผล (Start Detection)", use_container_width=True):
+            with st.spinner("กำลังวิเคราะห์โครงสร้างโมเดล..."):
+                s_val = float(s_th) if s_th.strip() else None
+                g_val = float(g_th) if g_th.strip() else None
+                st.session_state["hf_result"] = process_point_cloud(
+                    points_raw, slice_thickness=s_val, gap_threshold=g_val, verbose=False
+                )
+
+    with col_p:
+        result = st.session_state.get("hf_result")
+        if result:
+            st.markdown('<p class="step-header">ผลการตรวจหาจุดโหว่ (Hole Mapping)</p>', unsafe_allow_html=True)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("จุดที่ผ่านการกรอง", f"{len(result['original_inlier_points']):,}")
+            m2.metric("จำนวนรูโหว่ที่พบ", f"{len(result['gaps_axis1']) + len(result['gaps_axis2'])}")
+            m3.metric("ความหนาแน่นเฉลี่ย", f"{result['avg_point_spacing']:.4f}")
+            
+            orig = result['original_inlier_points']
+            bound = result['combined_boundary_pts']
+            
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter3d(
+                x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
+                mode='markers', marker=dict(size=1.5, color='#94A3B8', opacity=0.2), name="Base Surface"
+            ))
+            if len(bound) > 0:
+                fig2.add_trace(go.Scatter3d(
+                    x=bound[:, 0], y=bound[:, 1], z=bound[:, 2],
+                    mode='markers', marker=dict(size=4, color='#EF4444', opacity=0.8, line=dict(width=1, color='white')),
+                    name="Hole Boundary"
+                ))
+            fig2.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="white", height=600)
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("กรุณากด 'Start Detection' เพื่อวิเคราะห์ข้อมูล")
+
+# --- TAB 3: FINAL RECONSTRUCTION ---
+with tab_result:
+    result = st.session_state.get("hf_result")
+    if result:
+        col_f1, col_f2 = st.columns([1, 2])
+        
+        with col_f1:
+            st.markdown('<p class="step-header">การฟื้นฟูพื้นผิวแบบละเอียด</p>', unsafe_allow_html=True)
+            
+            # --- Cross-Hatching Controls ---
+            st.subheader("🔄 Cross-Hatching Logic")
+            st.write("เลือกแสดงผลการสานเส้น (Cross-Hatch) แยกตามแกนหลัก")
+            
+            show_axis1 = st.checkbox(f"แสดงเส้นเชื่อมแกน {result['axis_1']} (Primary)", value=True)
+            show_axis2 = st.checkbox(f"แสดงเส้นเชื่อมแกน {result['axis_2']} (Secondary)", value=True)
+            
+            # --- Animation Control ---
+            st.markdown("---")
+            st.subheader("🎞️ Simulation Progress")
+            st.write("เลื่อนเพื่อแสดงขั้นตอนการเชื่อมจุดแบบ Smooth")
+            progress = st.slider("ขั้นตอนการก่อร่าง (Reconstruction Step)", 0, 100, 100)
+            
+            st.markdown("---")
+            st.markdown("### 📥 ส่งออกข้อมูล")
+            out_buf = io.StringIO()
+            np.savetxt(out_buf, result['merged_points'], fmt='%.8f %.8f %.8f')
+            st.download_button("Download Reconstructed XYZ", data=out_buf.getvalue(), 
+                             file_name=f"{selected_file.split('.')[0]}_final.xyz", use_container_width=True)
+
+        with col_f2:
+            orig = result['original_inlier_points']
+            
+            # Filter fill points based on axes and progress
+            fill_list = []
+            if show_axis1: fill_list.append(result['bezier_pts_axis1'])
+            if show_axis2: fill_list.append(result['bezier_pts_axis2'])
+            
+            if fill_list:
+                full_fill = np.vstack(fill_list)
+                # Simple Animation: show points up to progress %
+                n_show = int(len(full_fill) * (progress / 100.0))
+                active_fill = full_fill[:n_show]
+            else:
+                active_fill = np.empty((0,3))
+            
+            fig3 = go.Figure()
+            # Base Original
+            fig3.add_trace(go.Scatter3d(
+                x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
+                mode='markers', marker=dict(size=1.5, color='#CBD5E1', opacity=0.3), name="Original Model"
+            ))
+            # Animated Reconstruction
+            if len(active_fill) > 0:
+                fig3.add_trace(go.Scatter3d(
+                    x=active_fill[:, 0], y=active_fill[:, 1], z=active_fill[:, 2],
+                    mode='markers', marker=dict(size=2.5, color='#3B82F6', opacity=0.9), name="Reconstructed"
+                ))
+            
+            fig3.update_layout(
+                scene=dict(aspectmode='data', xaxis=dict(showgrid=False), yaxis=dict(showgrid=False), zaxis=dict(showgrid=False)),
+                margin=dict(l=0, r=0, t=0, b=0),
+                paper_bgcolor="white",
+                height=700,
+                legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+            
+            if progress < 100:
+                st.caption(f"แสดงผลการ Reconstruction: {progress}% (เลื่อน Slider ด้านซ้ายเพื่อดูการเชื่อมจุดแบบต่อเนื่อง)")
     else:
-        st.info("Please run detection in the **Hole Detecter** tab first.")
+        st.warning("กรุณาทำขั้นตอนการวิเคราะห์ใน Tab 02 ให้เสร็จสิ้นก่อน")
