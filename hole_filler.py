@@ -227,195 +227,210 @@ def process_axis(points, primary_axis, slice_thickness, gap_threshold):
     return all_gap_pairs_3d
 
 
-def compute_slope_vector(point, neighbors, opposite_point=None):
+def deduplicate_gap_pairs(gap_pairs, min_distance):
     """
-    Compute the surface slope direction at a gap boundary point.
-    
+    Remove near-duplicate gap pairs whose boundary points are too close.
+
+    When slices are thin, the same hole edge gets detected in many
+    consecutive slices, producing almost-identical boundary pairs
+    that stack on top of each other.
+
     Algorithm:
-    1. Filter neighbors to only those "behind" the boundary (surface side).
-    2. Fit a line: direction from centroid of behind-neighbors through the
-       boundary point, pointing into the gap.
-    
+    For each pair, compute its midpoint. If a midpoint is within
+    min_distance of an already-kept pair's midpoint, skip it.
+
     Parameters
     ----------
-    point          : (3,) boundary point at the edge of the gap
-    neighbors      : (N, 3) nearby points
-    opposite_point : (3,) boundary point on the OTHER side of the gap
-    
+    gap_pairs : list of (p_left, p_right, dist, axis_val)
+    min_distance : float, minimum spacing between kept pairs
+
     Returns
     -------
-    (3,) unit vector pointing from surface into the gap
+    filtered : list of (p_left, p_right, dist, axis_val)
     """
-    if len(neighbors) == 0:
-        return np.zeros(3)
+    if len(gap_pairs) <= 1:
+        return gap_pairs
 
-    # Filter to "behind" neighbors (surface side, away from gap)
-    filtered = neighbors
-    if opposite_point is not None:
-        gap_dir = opposite_point - point
+    # Sort by gap distance descending so we keep the most significant gaps
+    sorted_pairs = sorted(gap_pairs, key=lambda x: x[2], reverse=True)
+
+    kept = []
+    kept_midpoints = []
+
+    for pair in sorted_pairs:
+        p_left, p_right = pair[0], pair[1]
+        mid = (np.asarray(p_left) + np.asarray(p_right)) / 2.0
+
+        # Check if too close to any already-kept pair
+        too_close = False
+        for km in kept_midpoints:
+            if np.linalg.norm(mid - km) < min_distance:
+                too_close = True
+                break
+
+        if not too_close:
+            kept.append(pair)
+            kept_midpoints.append(mid)
+
+    return kept
+
+
+def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
+    """
+    Robust tangent estimation using 2D PCA eigenvalue extraction.
+    This avoids math asymptotes (infinity) on vertical surfaces.
+    """
+    pts = np.asarray(pts_2d, dtype=np.float64)
+    point = np.asarray(point_2d, dtype=np.float64)
+    
+    if len(pts) < 2:
+        return np.zeros(2)
+        
+    behind = pts
+    if opposite_2d is not None:
+        opposite = np.asarray(opposite_2d, dtype=np.float64)
+        gap_dir = opposite - point
         gap_norm = np.linalg.norm(gap_dir)
         if gap_norm > 1e-12:
             gap_unit = gap_dir / gap_norm
-            dots = (neighbors - point) @ gap_unit
-            behind = neighbors[dots < 0]
-            if len(behind) >= 2:
-                filtered = behind
-
-    # Direction: centroid of behind-neighbors → boundary point → into gap
-    centroid = np.mean(filtered, axis=0)
-    direction = point - centroid
-    dir_norm = np.linalg.norm(direction)
-    if dir_norm < 1e-12:
-        # Fallback: just point toward opposite
-        if opposite_point is not None:
-            direction = opposite_point - point
-            dir_norm = np.linalg.norm(direction)
-            if dir_norm < 1e-12:
-                return np.zeros(3)
-        else:
-            return np.zeros(3)
+            dots = (pts - point) @ gap_unit
+            behind_mask = dots < 0
+            if np.sum(behind_mask) >= 2:
+                behind = pts[behind_mask]
+                
+    cov = np.cov(behind.T)
+    evals, evecs = np.linalg.eigh(cov)
+    tangent = evecs[:, -1]  # eigenvector with largest eigenvalue
     
-    return direction / dir_norm
+    # Orient the tangent to point INTO the gap
+    if opposite_2d is not None:
+        gap_dir = opposite - point
+        if np.dot(tangent, gap_dir) < 0:
+            tangent = -tangent
+            
+    return tangent
 
+def find_apex_2d(p_l, v_l, p_r, v_r, gap_length):
+    """2D ray intersection for the apex."""
+    A = np.column_stack([v_l, -v_r])
+    b = p_r - p_l
+    midpoint = (p_l + p_r) / 2.0
+    
+    try:
+        ts = np.linalg.solve(A, b)
+        t, s = ts[0], ts[1]
+        if t > 0 and s > 0:
+            apex = p_l + t * v_l
+            # Clamp offset
+            offset = np.linalg.norm(apex - midpoint)
+            max_offset = gap_length * 0.25
+            if offset > max_offset:
+                apex = midpoint + (apex - midpoint) * (max_offset / offset)
+            return apex
+    except np.linalg.LinAlgError:
+        pass
+        
+    # Parallel or backward intersection fallback
+    perp = np.array([-v_l[1], v_l[0]])
+    gap_vec = p_r - p_l
+    if np.dot(perp, gap_vec) < 0:
+        perp = -perp
+    return midpoint + perp * (gap_length * 0.3)
 
-# Backward-compatible wrapper (used in app.py visualization)
-def compute_tangent_from_neighbors(point, neighbors, gap_length=None, strength=0.33, opposite_point=None):
-    """Returns a scaled tangent vector for visualization."""
-    unit_dir = compute_slope_vector(point, neighbors, opposite_point=opposite_point)
-    if gap_length is not None and gap_length > 0:
-        return unit_dir * (strength * gap_length)
-    return unit_dir * strength
+def compute_g1_angle(v_left, v_right):
+    """Compute G1 continuity angle in degrees."""
+    n_l = np.linalg.norm(v_left)
+    n_r = np.linalg.norm(v_right)
+    if n_l < 1e-12 or n_r < 1e-12:
+        return 180.0
+    cos_angle = np.dot(v_left / n_l, v_right / n_r)
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_angle)))
 
+def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
+    """Fills a gap in 2D space natively with Auto Curve Tension."""
+    p_l = np.asarray(p_left)
+    p_r = np.asarray(p_right)
+    gap_vec = p_r - p_l
+    gap_length = np.linalg.norm(gap_vec)
+    
+    if gap_length < 1e-12:
+        return np.array([p_l]), np.zeros(2), np.zeros(2), p_l, []
 
-def find_apex_point(p_left, v_left, p_right, v_right):
+    # Filter neighbors near left and right
+    tree = KDTree(slice_points)
+    _, idx_l = tree.query(p_l, k=min(10, len(slice_points)))
+    _, idx_r = tree.query(p_r, k=min(10, len(slice_points)))
+    
+    nb_l = slice_points[[i for i in idx_l if not np.allclose(slice_points[i], p_l)]]
+    nb_r = slice_points[[i for i in idx_r if not np.allclose(slice_points[i], p_r)]]
+
+    v_l = estimate_tangent_2d(nb_l, p_l, opposite_2d=p_r)
+    v_r = estimate_tangent_2d(nb_r, p_r, opposite_2d=p_l)
+    
+    g1_angle = compute_g1_angle(v_l, v_r)
+        
+    apex = find_apex_2d(p_l, v_l, p_r, v_r, gap_length)
+    
+    # Auto Curve Tension: measure the natural bulge
+    midpoint = (p_l + p_r) / 2.0
+    offset = np.linalg.norm(apex - midpoint)
+    bulge_ratio = offset / gap_length if gap_length > 1e-12 else 0.0
+    
+    # If the slice's curvature (bulge) vastly exceeds the norm, pull it back to avoid wobbling
+    curve_tension = 0.666
+    if bulge_ratio > 0.05:
+        # Scale tension down as bulge ratio increases (from 0.05 up to 0.25 max offset)
+        factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
+        curve_tension = 0.666 - (factor * 0.45) # Drops to ~0.21, smoothing it out
+    
+    P0 = p_l
+    P1 = curve_tension*apex + (1.0 - curve_tension)*p_l
+    P2 = curve_tension*apex + (1.0 - curve_tension)*p_r
+    P3 = p_r
+    
+    t_vals = np.linspace(0.0, 1.0, num_points)[:, np.newaxis]
+    u = 1.0 - t_vals
+    curve = u**3*P0 + 3*u**2*t_vals*P1 + 3*u*t_vals**2*P2 + t_vals**3*P3
+    
+    return curve, v_l, v_r, apex, [P1, P2]
+
+def cubic_bezier_fill_gap(p_left_3d, p_right_3d, num_points=20, neighbors_left=None, neighbors_right=None, slice_axis_idx=0):
     """
-    Triangulation: find the apex point p_c where two rays intersect.
-    
-    Ray 1: p_left  + t * v_left
-    Ray 2: p_right + s * v_right
-    
-    In 3D, rays rarely intersect exactly. We find the midpoint of the
-    shortest segment connecting the two rays (closest approach).
-    
-    The apex is clamped to at most 50% of the gap distance from the
-    midpoint to prevent extreme curvature.
-    
-    Parameters
-    ----------
-    p_left  : (3,) left boundary point
-    v_left  : (3,) slope direction at left (unit vector)
-    p_right : (3,) right boundary point
-    v_right : (3,) slope direction at right (unit vector)
-    
-    Returns
-    -------
-    p_c : (3,) apex point
+    Wrapper that maps the 3D points into a 2D plane, calls the 2D native Bezier fill,
+    and maps the generated curve back to 3D safely.
     """
-    w0 = p_left - p_right
-    a = float(np.dot(v_left, v_left))
-    b = float(np.dot(v_left, v_right))
-    c = float(np.dot(v_right, v_right))
-    d = float(np.dot(v_left, w0))
-    e = float(np.dot(v_right, w0))
+    p_l = np.asarray(p_left_3d)
+    p_r = np.asarray(p_right_3d)
     
-    denom = a * c - b * b
+    other_cols = [c for c in (0, 1, 2) if c != slice_axis_idx]
     
-    gap_vec = p_right - p_left
-    gap_length = float(np.linalg.norm(gap_vec))
-    midpoint = (p_left + p_right) / 2.0
+    p_left_2d = p_l[other_cols]
+    p_right_2d = p_r[other_cols]
     
-    if abs(denom) < 1e-12:
-        # Rays are parallel — fallback: midpoint raised perpendicular
-        perp = np.cross(gap_vec, v_left)
-        perp_norm = np.linalg.norm(perp)
-        if perp_norm > 1e-12:
-            perp = perp / perp_norm
-            return midpoint + perp * (gap_length * 0.3)
-        else:
-            return midpoint
-    
-    t_param = (b * e - c * d) / denom
-    s_param = (a * e - b * d) / denom
-    
-    # Ensure rays go "forward" (positive parameters only)
-    t_param = max(t_param, 0.0)
-    s_param = max(s_param, 0.0)
-    
-    closest_on_ray1 = p_left + t_param * v_left
-    closest_on_ray2 = p_right + s_param * v_right
-    
-    # Apex = midpoint between the two closest points
-    p_c = (closest_on_ray1 + closest_on_ray2) / 2.0
-    
-    # CLAMP: limit apex distance to max 50% of gap distance
-    apex_offset = np.linalg.norm(p_c - midpoint)
-    max_offset = gap_length * 0.5
-    if apex_offset > max_offset and apex_offset > 1e-12:
-        p_c = midpoint + (p_c - midpoint) * (max_offset / apex_offset)
-    
-    return p_c
-
-
-def cubic_bezier_fill_gap(p_left, p_right, num_points=20, neighbors_left=None, neighbors_right=None):
-    """
-    Fill a gap between p_left and p_right with a cubic Bezier curve.
-    
-    Algorithm (from research poster):
-    
-    Step 1 — Triangulation:
-        Compute slope vectors v_l, v_r from neighbours at each boundary.
-        Find apex point p_c where the two rays intersect (triangulation).
-    
-    Step 2 — Control Point Calculation (1:2 ratio):
-        P1 = (2/3) * p_c + (1/3) * p_left
-        P2 = (1/3) * p_c + (2/3) * p_right
-    
-    Bezier curve:  B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
-    
-    Parameters
-    ----------
-    p_left, p_right : array-like (3,)
-    num_points      : int, number of interpolated points
-    neighbors_left  : array (N, 3)
-    neighbors_right : array (N, 3)
-    
-    Returns
-    -------
-    curve_pts : ndarray (num_points, 3)
-    """
-    p_left  = np.asarray(p_left,  dtype=np.float64)
-    p_right = np.asarray(p_right, dtype=np.float64)
-
-    # Step 1: Compute slope vectors (direction from surface into gap)
-    v_left = compute_slope_vector(
-        p_left,
-        neighbors_left if neighbors_left is not None else np.empty((0, 3)),
-        opposite_point=p_right
+    all_neighbors = []
+    if neighbors_left is not None and len(neighbors_left) > 0:
+        all_neighbors.append(neighbors_left[:, other_cols])
+    if neighbors_right is not None and len(neighbors_right) > 0:
+        all_neighbors.append(neighbors_right[:, other_cols])
+        
+    if all_neighbors:
+        slice_points_2d = np.vstack(all_neighbors)
+    else:
+        slice_points_2d = np.empty((0, 2))
+        
+    curve_2d, _, _, _, _ = cubic_bezier_fill_gap_g1(
+        p_left_2d, p_right_2d, slice_points_2d, 
+        num_points=num_points
     )
-    v_right = compute_slope_vector(
-        p_right,
-        neighbors_right if neighbors_right is not None else np.empty((0, 3)),
-        opposite_point=p_left
-    )
-
-    # Step 1: Triangulation — find apex point p_c
-    p_c = find_apex_point(p_left, v_left, p_right, v_right)
-
-    # Step 2: Control points with 1:2 ratio
-    P0 = p_left
-    P1 = (2.0 / 3.0) * p_c + (1.0 / 3.0) * p_left    # closer to apex
-    P2 = (1.0 / 3.0) * p_c + (2.0 / 3.0) * p_right   # closer to boundary
-    P3 = p_right
-
-    # Bezier curve: B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
-    t_vals = np.linspace(0.0, 1.0, num_points)
-    curve_pts = np.zeros((num_points, 3), dtype=np.float64)
-
-    for i, t in enumerate(t_vals):
-        u = 1.0 - t
-        curve_pts[i] = u**3*P0 + 3*u**2*t*P1 + 3*u*t**2*P2 + t**3*P3
-
-    return curve_pts
+    
+    # Map back to 3D
+    curve_3d = np.zeros((len(curve_2d), 3))
+    curve_3d[:, slice_axis_idx] = (p_l[slice_axis_idx] + p_r[slice_axis_idx]) / 2.0
+    for i, col in enumerate(other_cols):
+        curve_3d[:, col] = curve_2d[:, i]
+        
+    return curve_3d
 
 
 # =============================================================================
@@ -454,7 +469,7 @@ def merge_and_average_points(original, new_points, merge_distance=1e-3):
     return np.array(merged)
 
 
-def fill_all_gaps(points, gap_pairs, num_points_per_gap=20, neighbor_k=5):
+def fill_all_gaps(points, gap_pairs, num_points_per_gap=20, neighbor_k=5, slice_axis_idx=0, avg_spacing=None):
     """
     Fill all detected gap pairs with Bezier curves.
 
@@ -482,14 +497,64 @@ def fill_all_gaps(points, gap_pairs, num_points_per_gap=20, neighbor_k=5):
         nb_left  = pts_array[[i for i in idx_left  if not np.allclose(pts_array[i], p_left)]]
         nb_right = pts_array[[i for i in idx_right if not np.allclose(pts_array[i], p_right)]]
 
-        curve = cubic_bezier_fill_gap(p_left, p_right, num_points=num_points_per_gap,
-                                       neighbors_left=nb_left, neighbors_right=nb_right)
+        # Dynamic density check: long gaps get more points, short gaps get fewer points
+        n_pts = num_points_per_gap
+        if avg_spacing is not None and avg_spacing > 0:
+            n_pts = max(3, int(dist / avg_spacing) + 1)
+
+        curve = cubic_bezier_fill_gap(
+            p_left, p_right, 
+            num_points=n_pts,
+            neighbors_left=nb_left, 
+            neighbors_right=nb_right,
+            slice_axis_idx=slice_axis_idx
+        )
         filled.append(curve)
 
     if not filled:
         return np.empty((0, 3))
 
     return np.vstack(filled)
+
+
+def guess_axis_curvature(points, gaps, slice_axis_idx=0, neighbor_k=5):
+    """
+    Evaluates how "curved" a set of gaps are.
+    Returns the average G1 angle. Lower angle = more curved (tighter corner).
+    """
+    if not gaps:
+        return 180.0
+    pts_array = np.asarray(points)
+    tree = KDTree(pts_array)
+    angles = []
+    
+    for p_left, p_right, dist, axis_val in gaps:
+        _, idx_left  = tree.query(p_left,  k=min(neighbor_k + 1, len(pts_array)))
+        _, idx_right = tree.query(p_right, k=min(neighbor_k + 1, len(pts_array)))
+
+        nb_left  = pts_array[[i for i in idx_left  if not np.allclose(pts_array[i], p_left)]]
+        nb_right = pts_array[[i for i in idx_right if not np.allclose(pts_array[i], p_right)]]
+        
+        other_cols = [c for c in (0, 1, 2) if c != slice_axis_idx]
+        p_l_2d = p_left[other_cols]
+        p_r_2d = p_right[other_cols]
+        
+        all_neighbors = []
+        if len(nb_left) > 0:
+            all_neighbors.append(nb_left[:, other_cols])
+        if len(nb_right) > 0:
+            all_neighbors.append(nb_right[:, other_cols])
+            
+        if all_neighbors:
+            slice_points_2d = np.vstack(all_neighbors)
+            v_l = estimate_tangent_2d(slice_points_2d, p_l_2d, opposite_2d=p_r_2d)
+            v_r = estimate_tangent_2d(slice_points_2d, p_r_2d, opposite_2d=p_l_2d)
+            angle = compute_g1_angle(v_l, v_r)
+            angles.append(angle)
+            
+    if not angles:
+        return 180.0
+    return float(np.mean(angles))
 
 
 # =============================================================================
@@ -591,7 +656,7 @@ def process_point_cloud(points,
 
     # ---- Step 3: Fill gaps ----
     t0 = _time.perf_counter()
-
+    
     # Select fill function based on fill_method
     if fill_method == 'bezier':
         fill_fn = fill_all_gaps
@@ -606,11 +671,15 @@ def process_point_cloud(points,
 
     bezier_pts_1_pca = fill_fn(pts_clean, gaps_axis1,
                                num_points_per_gap=num_points_per_gap,
-                               neighbor_k=neighbor_k)
+                               neighbor_k=neighbor_k,
+                               slice_axis_idx=0,
+                               avg_spacing=avg_point_spacing)
     if use_cross_hatch and gaps_axis2:
         bezier_pts_2_pca = fill_fn(pts_clean, gaps_axis2,
                                    num_points_per_gap=num_points_per_gap,
-                                   neighbor_k=neighbor_k)
+                                   neighbor_k=neighbor_k,
+                                   slice_axis_idx=1,
+                                   avg_spacing=avg_point_spacing)
     else:
         bezier_pts_2_pca = np.empty((0, 3))
     timings['fill'] = _time.perf_counter() - t0
@@ -721,4 +790,3 @@ if __name__ == '__main__':
     out_path = args.output or (os.path.splitext(args.input)[0] + '_filled.xyz')
     np.savetxt(out_path, result['merged_points'], fmt='%.8f %.8f %.8f')
     print(f'Saved → {out_path}  ({len(result["merged_points"])} points)')
-

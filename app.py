@@ -7,8 +7,8 @@ import io
 
 from slicer import load_points_from_file
 from hole_filler import (process_point_cloud, apply_inverse_pca,
-                         compute_slope_vector, find_apex_point,
-                         compute_tangent_from_neighbors, axis_col)
+                         estimate_tangent_2d, find_apex_2d,
+                         axis_col, compute_g1_angle)
 from metrics import (compute_all_metrics, chamfer_distance, surface_roughness,
                      point_density_uniformity)
 
@@ -135,7 +135,7 @@ with tab_analysis:
         st.markdown("### ⚙️ พารามิเตอร์")
         s_th = st.text_input("Slice Thickness", placeholder="Auto", key="s_th")
         g_th = st.text_input("Gap Threshold", placeholder="Auto", key="g_th")
-
+        
         if st.button("🔍 เริ่มประมวลผล", use_container_width=True):
             with st.spinner("กำลังวิเคราะห์..."):
                 s_val = float(s_th) if s_th.strip() else None
@@ -256,32 +256,51 @@ with tab_deepdive:
                 nb_left = pts_pca[[i for i in idx_l if not np.allclose(pts_pca[i], p_left_pca)]]
                 nb_right = pts_pca[[i for i in idx_r if not np.allclose(pts_pca[i], p_right_pca)]]
 
-                # Step 1: Slope vectors (unit direction, using behind-neighbors only)
-                v_left = compute_slope_vector(p_left_pca, nb_left, opposite_point=p_right_pca)
-                v_right = compute_slope_vector(p_right_pca, nb_right, opposite_point=p_left_pca)
+                p_l_2d = p_left_pca[[ax_h, ax_v]]
+                p_r_2d = p_right_pca[[ax_h, ax_v]]
+                
+                slice_points_2d = np.empty((0, 2))
+                if len(nb_left) > 0 and len(nb_right) > 0:
+                    slice_points_2d = np.vstack([nb_left[:, [ax_h, ax_v]], nb_right[:, [ax_h, ax_v]]])
 
-                # Step 1: Triangulation — find apex p_c
-                p_c = find_apex_point(p_left_pca, v_left, p_right_pca, v_right)
+                v_left = estimate_tangent_2d(slice_points_2d, p_l_2d, opposite_2d=p_r_2d)
+                v_right = estimate_tangent_2d(slice_points_2d, p_r_2d, opposite_2d=p_l_2d)
 
-                # Step 2: Control points with 1:2 ratio
-                P0 = p_left_pca
-                P1 = (2.0/3.0) * p_c + (1.0/3.0) * p_left_pca
-                P2 = (1.0/3.0) * p_c + (2.0/3.0) * p_right_pca
-                P3 = p_right_pca
+                p_c_2d = find_apex_2d(p_l_2d, v_left, p_r_2d, v_right, gap_dist)
+                
+                # Auto Curve Tension logic (mirroring hole_filler.py)
+                midpoint = (p_l_2d + p_r_2d) / 2.0
+                offset = np.linalg.norm(p_c_2d - midpoint)
+                bulge_ratio = offset / gap_dist if gap_dist > 1e-12 else 0.0
+                c_tension = 0.666
+                if bulge_ratio > 0.05:
+                    factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
+                    c_tension = 0.666 - (factor * 0.45)
 
-                # For visualization: scale slope vectors for arrows
+                # Step 2: Control points with auto ratio in 2D
+                P0 = p_l_2d
+                P1 = c_tension * p_c_2d + (1.0 - c_tension) * p_l_2d
+                P2 = c_tension * p_c_2d + (1.0 - c_tension) * p_r_2d
+                P3 = p_r_2d
+
                 arrow_scale = gap_dist * 0.6
                 v_left_scaled = v_left * arrow_scale
                 v_right_scaled = v_right * arrow_scale
 
-                # Compute Bezier curve
-                t_vals = np.linspace(0.0, 1.0, n_curve_pts)
+                # Compute Bezier curve in 2D then map to 3D
+                t_vals = np.linspace(0.0, 1.0, n_curve_pts)[:, np.newaxis]
+                u = 1.0 - t_vals
+                curve_2d = u**3*P0 + 3*u**2*t_vals*P1 + 3*u*t_vals**2*P2 + t_vals**3*P3
+                
                 curve_pca = np.zeros((n_curve_pts, 3))
-                for i, t in enumerate(t_vals):
-                    u = 1.0 - t
-                    curve_pca[i] = u**3*P0 + 3*u**2*t*P1 + 3*u*t**2*P2 + t**3*P3
-
-                ctrl_pts_pca = np.array([P0, P1, P2, P3])
+                curve_pca[:, col_idx] = axis_val
+                curve_pca[:, ax_h] = curve_2d[:, 0]
+                curve_pca[:, ax_v] = curve_2d[:, 1]
+                
+                ctrl_pts_pca = np.zeros((4, 3))
+                ctrl_pts_pca[:, col_idx] = axis_val
+                ctrl_pts_pca[:, ax_h] = [P0[0], P1[0], P2[0], P3[0]]
+                ctrl_pts_pca[:, ax_v] = [P0[1], P1[1], P2[1], P3[1]]
 
                 # === BUILD 2D FIGURE ===
                 fig = go.Figure()
@@ -297,7 +316,7 @@ with tab_deepdive:
                 # Step 2+: Gap boundary + slope vectors
                 if "②" in step or "③" in step or "④" in step:
                     fig.add_trace(go.Scatter(
-                        x=[P0[ax_h], P3[ax_h]], y=[P0[ax_v], P3[ax_v]],
+                        x=[P0[0], P3[0]], y=[P0[1], P3[1]],
                         mode='markers+text',
                         marker=dict(size=14, color='#EF4444', symbol='diamond',
                                     line=dict(width=2, color='white')),
@@ -307,7 +326,7 @@ with tab_deepdive:
                     ))
                     # Dashed gap line
                     fig.add_trace(go.Scatter(
-                        x=[P0[ax_h], P3[ax_h]], y=[P0[ax_v], P3[ax_v]],
+                        x=[P0[0], P3[0]], y=[P0[1], P3[1]],
                         mode='lines', line=dict(color='#EF4444', width=2, dash='dash'),
                         name=f"Gap (dist={gap_dist:.4f})"
                     ))
@@ -315,14 +334,14 @@ with tab_deepdive:
                     tip_l = P0 + v_left_scaled
                     tip_r = P3 + v_right_scaled
                     fig.add_trace(go.Scatter(
-                        x=[P0[ax_h], tip_l[ax_h]], y=[P0[ax_v], tip_l[ax_v]],
+                        x=[P0[0], tip_l[0]], y=[P0[1], tip_l[1]],
                         mode='lines+markers',
                         line=dict(color='#8B5CF6', width=3),
                         marker=dict(size=[0, 10], color='#8B5CF6', symbol=['circle', 'arrow-up']),
                         name="v_l (slope left)"
                     ))
                     fig.add_trace(go.Scatter(
-                        x=[P3[ax_h], tip_r[ax_h]], y=[P3[ax_v], tip_r[ax_v]],
+                        x=[P3[0], tip_r[0]], y=[P3[1], tip_r[1]],
                         mode='lines+markers',
                         line=dict(color='#EC4899', width=3),
                         marker=dict(size=[0, 10], color='#EC4899', symbol=['circle', 'arrow-up']),
@@ -331,9 +350,9 @@ with tab_deepdive:
 
                 # Step 3+: Apex point + control points + 1:2 ratio lines
                 if "③" in step or "④" in step:
-                    # Apex point p_c (star)
+                    # Apex point p_c_2d (star)
                     fig.add_trace(go.Scatter(
-                        x=[p_c[ax_h]], y=[p_c[ax_v]],
+                        x=[p_c_2d[0]], y=[p_c_2d[1]],
                         mode='markers+text',
                         marker=dict(size=18, color='#F59E0B', symbol='star',
                                     line=dict(width=2, color='#92400E')),
@@ -343,14 +362,14 @@ with tab_deepdive:
                     ))
                     # Lines from apex to boundaries (showing triangulation)
                     fig.add_trace(go.Scatter(
-                        x=[P0[ax_h], p_c[ax_h], P3[ax_h]],
-                        y=[P0[ax_v], p_c[ax_v], P3[ax_v]],
+                        x=[P0[0], p_c_2d[0], P3[0]],
+                        y=[P0[1], p_c_2d[1], P3[1]],
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
                         name="Triangulation"
                     ))
                     # Control points (1:2 ratio)
                     fig.add_trace(go.Scatter(
-                        x=[P1[ax_h], P2[ax_h]], y=[P1[ax_v], P2[ax_v]],
+                        x=[P1[0], P2[0]], y=[P1[1], P2[1]],
                         mode='markers+text',
                         marker=dict(size=12, color='#F97316', symbol='cross',
                                     line=dict(width=1, color='#7C2D12')),
@@ -363,7 +382,7 @@ with tab_deepdive:
                 # Step 4: Bezier curve
                 if "④" in step:
                     fig.add_trace(go.Scatter(
-                        x=curve_pca[:, ax_h], y=curve_pca[:, ax_v],
+                        x=curve_2d[:, 0], y=curve_2d[:, 1],
                         mode='lines+markers',
                         line=dict(color='#10B981', width=4),
                         marker=dict(size=5, color='#10B981'),
@@ -381,9 +400,14 @@ with tab_deepdive:
                 st.plotly_chart(fig, use_container_width=True)
 
                 # Info card
-                p_left_orig = apply_inverse_pca(P0.reshape(1, 3), rot_mat, mean_pt)[0]
-                p_right_orig = apply_inverse_pca(P3.reshape(1, 3), rot_mat, mean_pt)[0]
-                p_c_orig = apply_inverse_pca(p_c.reshape(1, 3), rot_mat, mean_pt)[0]
+                p_c_pca = np.zeros(3)
+                p_c_pca[col_idx] = axis_val
+                p_c_pca[ax_h] = p_c_2d[0]
+                p_c_pca[ax_v] = p_c_2d[1]
+
+                p_left_orig = apply_inverse_pca(ctrl_pts_pca[0].reshape(1, 3), rot_mat, mean_pt)[0]
+                p_right_orig = apply_inverse_pca(ctrl_pts_pca[3].reshape(1, 3), rot_mat, mean_pt)[0]
+                p_c_orig = apply_inverse_pca(p_c_pca.reshape(1, 3), rot_mat, mean_pt)[0]
                 ctrl_orig = apply_inverse_pca(ctrl_pts_pca, rot_mat, mean_pt)
 
                 st.markdown(f"""
@@ -432,25 +456,28 @@ with tab_result:
 
         with col_f2:
             orig = result['original_inlier_points']
-            fill_list = []
-            if show_axis1: fill_list.append(result['bezier_pts_axis1'])
-            if show_axis2: fill_list.append(result['bezier_pts_axis2'])
-            if fill_list:
-                full_fill = np.vstack(fill_list)
-                n_show = int(len(full_fill) * (progress / 100.0))
-                active_fill = full_fill[:n_show]
-            else:
-                active_fill = np.empty((0, 3))
+            fill_1 = result['bezier_pts_axis1'] if show_axis1 else np.empty((0,3))
+            fill_2 = result['bezier_pts_axis2'] if show_axis2 else np.empty((0,3))
+            
+            n_show_1 = int(len(fill_1) * (progress / 100.0))
+            n_show_2 = int(len(fill_2) * (progress / 100.0))
+            active_1 = fill_1[:n_show_1]
+            active_2 = fill_2[:n_show_2]
 
             fig3 = go.Figure()
             fig3.add_trace(go.Scatter3d(
                 x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
                 mode='markers', marker=dict(size=1.5, color='#CBD5E1', opacity=0.3), name="Original"
             ))
-            if len(active_fill) > 0:
+            if len(active_1) > 0:
                 fig3.add_trace(go.Scatter3d(
-                    x=active_fill[:, 0], y=active_fill[:, 1], z=active_fill[:, 2],
-                    mode='markers', marker=dict(size=2.5, color='#3B82F6', opacity=0.9), name="Reconstructed"
+                    x=active_1[:, 0], y=active_1[:, 1], z=active_1[:, 2],
+                    mode='markers', marker=dict(size=2.5, color='#3B82F6', opacity=0.9), name="Primary Axis"
+                ))
+            if len(active_2) > 0:
+                fig3.add_trace(go.Scatter3d(
+                    x=active_2[:, 0], y=active_2[:, 1], z=active_2[:, 2],
+                    mode='markers', marker=dict(size=2.5, color='#F59E0B', opacity=0.9), name="Secondary (Loft)"
                 ))
             fig3.update_layout(
                 scene=dict(aspectmode='data', xaxis=dict(showgrid=False), yaxis=dict(showgrid=False), zaxis=dict(showgrid=False)),
