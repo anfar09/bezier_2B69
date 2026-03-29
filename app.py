@@ -247,41 +247,82 @@ with tab_deepdive:
                 ax_h, ax_v = axes_3d[0], axes_3d[1]
                 axis_names = ['PCA-X', 'PCA-Y', 'PCA-Z']
 
-                # === TRIANGULATION ALGORITHM ===
-                from scipy.spatial import KDTree
-                tree = KDTree(pts_pca)
-                k_nb = min(6, len(pts_pca))
-                _, idx_l = tree.query(p_left_pca, k=k_nb)
-                _, idx_r = tree.query(p_right_pca, k=k_nb)
-                nb_left = pts_pca[[i for i in idx_l if not np.allclose(pts_pca[i], p_left_pca)]]
-                nb_right = pts_pca[[i for i in idx_r if not np.allclose(pts_pca[i], p_right_pca)]]
-
+                # === TANGENT VIA LINEAR REGRESSION (polyfit) ===
+                # Fit a line through k adjacent surface points near each boundary.
+                # v_left always has +x (→ rightward into gap)
+                # v_right always has -x (← leftward into gap)
+                # This GUARANTEES the tangent rays converge (no divergence).
+                
                 p_l_2d = p_left_pca[[ax_h, ax_v]]
                 p_r_2d = p_right_pca[[ax_h, ax_v]]
-                
-                slice_points_2d = np.empty((0, 2))
-                if len(nb_left) > 0 and len(nb_right) > 0:
-                    slice_points_2d = np.vstack([nb_left[:, [ax_h, ax_v]], nb_right[:, [ax_h, ax_v]]])
 
-                v_left = estimate_tangent_2d(slice_points_2d, p_l_2d, opposite_2d=p_r_2d)
-                v_right = estimate_tangent_2d(slice_points_2d, p_r_2d, opposite_2d=p_l_2d)
+                slice_2d_all = slice_pts_pca[:, [ax_h, ax_v]]
+                sort_order = np.argsort(slice_2d_all[:, 0])
+                sorted_2d = slice_2d_all[sort_order]
 
-                p_c_2d = find_apex_2d(p_l_2d, v_left, p_r_2d, v_right, gap_dist)
-                
-                # Auto Curve Tension logic (mirroring hole_filler.py)
-                midpoint = (p_l_2d + p_r_2d) / 2.0
-                offset = np.linalg.norm(p_c_2d - midpoint)
-                bulge_ratio = offset / gap_dist if gap_dist > 1e-12 else 0.0
-                c_tension = 0.666
-                if bulge_ratio > 0.05:
-                    factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
-                    c_tension = 0.666 - (factor * 0.45)
+                # Find P0 and P3 positions in the sorted order
+                dists_to_p0 = np.linalg.norm(sorted_2d - p_l_2d, axis=1)
+                p0_idx = int(np.argmin(dists_to_p0))
 
-                # Step 2: Control points with auto ratio in 2D
+                dists_to_p3 = np.linalg.norm(sorted_2d - p_r_2d, axis=1)
+                p3_idx = int(np.argmin(dists_to_p3))
+
+                n_adj = 5
+
+                # --- Left tangent: fit line through k points to the LEFT of P0 ---
+                k_left = min(n_adj, p0_idx)
+                if k_left >= 2:
+                    left_pts = sorted_2d[p0_idx - k_left : p0_idx + 1]
+                    coeffs_l = np.polyfit(left_pts[:, 0], left_pts[:, 1], deg=1)
+                    slope_l = coeffs_l[0]
+                    v_left = np.array([1.0, slope_l])
+                    v_left = v_left / np.linalg.norm(v_left)
+                elif k_left == 1:
+                    adj = sorted_2d[p0_idx - 1]
+                    v_left = p_l_2d - adj
+                    nl = np.linalg.norm(v_left)
+                    v_left = v_left / nl if nl > 1e-12 else np.array([1.0, 0.0])
+                else:
+                    v_left = np.array([1.0, 0.0])
+
+                # --- Right tangent: fit line through k points to the RIGHT of P3 ---
+                k_right = min(n_adj, len(sorted_2d) - 1 - p3_idx)
+                if k_right >= 2:
+                    right_pts = sorted_2d[p3_idx : p3_idx + k_right + 1]
+                    coeffs_r = np.polyfit(right_pts[:, 0], right_pts[:, 1], deg=1)
+                    slope_r = coeffs_r[0]
+                    # Into gap = leftward: (-1, -slope) preserves the slope relationship
+                    v_right = np.array([-1.0, -slope_r])
+                    v_right = v_right / np.linalg.norm(v_right)
+                elif k_right == 1:
+                    adj = sorted_2d[p3_idx + 1]
+                    v_right = p_r_2d - adj
+                    nr = np.linalg.norm(v_right)
+                    v_right = v_right / nr if nr > 1e-12 else np.array([-1.0, 0.0])
+                else:
+                    v_right = np.array([-1.0, 0.0])
+
+                # === HERMITE-TO-BEZIER CONTROL POINTS ===
+                # P1 = P0 + (gap/3) * v_left  (always inside the gap)
+                # P2 = P3 + (gap/3) * v_right (always inside the gap)
+                # This ALWAYS works — no ray intersection needed.
+                hermite_scale = gap_dist / 3.0
+
                 P0 = p_l_2d
-                P1 = c_tension * p_c_2d + (1.0 - c_tension) * p_l_2d
-                P2 = c_tension * p_c_2d + (1.0 - c_tension) * p_r_2d
+                P1 = P0 + hermite_scale * v_left
+                P2 = p_r_2d + hermite_scale * v_right
                 P3 = p_r_2d
+
+                # Virtual apex for display: intersection of control arms
+                # P0→P1 extended and P3→P2 extended
+                dir_01 = P1 - P0
+                dir_32 = P2 - P3
+                try:
+                    A = np.column_stack([dir_01, -dir_32])
+                    ts = np.linalg.solve(A, P3 - P0)
+                    p_c_2d = P0 + ts[0] * dir_01
+                except np.linalg.LinAlgError:
+                    p_c_2d = (P1 + P2) / 2.0
 
                 arrow_scale = gap_dist * 0.6
                 v_left_scaled = v_left * arrow_scale
@@ -348,35 +389,29 @@ with tab_deepdive:
                         name="v_r (slope right)"
                     ))
 
-                # Step 3+: Apex point + control points + 1:2 ratio lines
+                # Step 3+: Control points (Hermite) + control arms
                 if "③" in step or "④" in step:
-                    # Apex point p_c_2d (star)
+                    # Control arms: P0→P1 and P3→P2 (showing Hermite construction)
                     fig.add_trace(go.Scatter(
-                        x=[p_c_2d[0]], y=[p_c_2d[1]],
-                        mode='markers+text',
-                        marker=dict(size=18, color='#F59E0B', symbol='star',
-                                    line=dict(width=2, color='#92400E')),
-                        text=['p_c (Apex)'], textposition='top center',
-                        textfont=dict(size=13, color='#F59E0B', family='Inter'),
-                        name="Apex Point (p_c)"
-                    ))
-                    # Lines from apex to boundaries (showing triangulation)
-                    fig.add_trace(go.Scatter(
-                        x=[P0[0], p_c_2d[0], P3[0]],
-                        y=[P0[1], p_c_2d[1], P3[1]],
+                        x=[P0[0], P1[0]], y=[P0[1], P1[1]],
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
-                        name="Triangulation"
+                        name="Control Arm (P0→P1)"
                     ))
-                    # Control points (1:2 ratio)
+                    fig.add_trace(go.Scatter(
+                        x=[P3[0], P2[0]], y=[P3[1], P2[1]],
+                        mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
+                        name="Control Arm (P3→P2)"
+                    ))
+                    # Control points P1 and P2
                     fig.add_trace(go.Scatter(
                         x=[P1[0], P2[0]], y=[P1[1], P2[1]],
                         mode='markers+text',
                         marker=dict(size=12, color='#F97316', symbol='cross',
                                     line=dict(width=1, color='#7C2D12')),
-                        text=['P1 (2/3 apex)', 'P2 (1/3 apex)'],
+                        text=['P1 (Hermite)', 'P2 (Hermite)'],
                         textposition='bottom center',
                         textfont=dict(size=10, color='#F97316'),
-                        name="Control Points (1:2)"
+                        name="Control Points (Hermite)"
                     ))
 
                 # Step 4: Bezier curve
@@ -412,17 +447,17 @@ with tab_deepdive:
 
                 st.markdown(f"""
                 <div class="method-card">
-                <b>📝 Triangulation + 1:2 Ratio</b><br>
+                <b>📝 Hermite-to-Bezier Construction</b><br>
                 <b>Slice:</b> {slice_axis}={axis_val:.4f} &nbsp;|&nbsp;
-                <b>Gap:</b> {gap_dist:.4f}<br><br>
-                <b>🔺 Triangulation:</b><br>
+                <b>Gap:</b> {gap_dist:.4f} &nbsp;|&nbsp;
+                <b>Hermite Scale:</b> {hermite_scale:.4f}<br><br>
+                <b>🔹 Boundary Points:</b><br>
                 <b>P0 (pl_n):</b> [{p_left_orig[0]:.4f}, {p_left_orig[1]:.4f}, {p_left_orig[2]:.4f}]<br>
-                <b>P3 (pr_m):</b> [{p_right_orig[0]:.4f}, {p_right_orig[1]:.4f}, {p_right_orig[2]:.4f}]<br>
-                <b>⭐ p_c (Apex):</b> [{p_c_orig[0]:.4f}, {p_c_orig[1]:.4f}, {p_c_orig[2]:.4f}]<br><br>
-                <b>📐 Control Points (1:2 ratio):</b><br>
-                <b>P1 = ⅔·p_c + ⅓·pl_n:</b> [{ctrl_orig[1,0]:.4f}, {ctrl_orig[1,1]:.4f}, {ctrl_orig[1,2]:.4f}]<br>
-                <b>P2 = ⅓·p_c + ⅔·pr_m:</b> [{ctrl_orig[2,0]:.4f}, {ctrl_orig[2,1]:.4f}, {ctrl_orig[2,2]:.4f}]<br>
-                <b>Slice Points:</b> {len(slice_pts_pca)} &nbsp;|&nbsp;
+                <b>P3 (pr_m):</b> [{p_right_orig[0]:.4f}, {p_right_orig[1]:.4f}, {p_right_orig[2]:.4f}]<br><br>
+                <b>📐 Control Points (Hermite: P + gap/3 · tangent):</b><br>
+                <b>P1 = P0 + (gap/3)·v_left:</b> [{ctrl_orig[1,0]:.4f}, {ctrl_orig[1,1]:.4f}, {ctrl_orig[1,2]:.4f}]<br>
+                <b>P2 = P3 + (gap/3)·v_right:</b> [{ctrl_orig[2,0]:.4f}, {ctrl_orig[2,1]:.4f}, {ctrl_orig[2,2]:.4f}]<br>
+                <b>Tangent method:</b> Linear Regression (polyfit, {n_adj} pts) &nbsp;|&nbsp;
                 <b>Curve Points:</b> {n_curve_pts}
                 </div>
                 """, unsafe_allow_html=True)
