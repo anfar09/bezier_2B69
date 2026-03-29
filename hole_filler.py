@@ -517,6 +517,175 @@ def fill_all_gaps(points, gap_pairs, num_points_per_gap=20, neighbor_k=5, slice_
     return np.vstack(filled)
 
 
+# =============================================================================
+# 6. SURFACE DENSIFICATION — INTERMEDIATE CURVES & UNIFORM SCATTER
+# =============================================================================
+
+def fill_all_gaps_tracked(points, gap_pairs, num_points_per_gap=20,
+                          neighbor_k=5, slice_axis_idx=0, avg_spacing=None):
+    """
+    Like fill_all_gaps but returns individual curves with metadata
+    for grouping and surface densification.
+    """
+    pts_array = np.asarray(points)
+    tree = KDTree(pts_array)
+    curves = []
+
+    for p_left, p_right, dist, axis_val in gap_pairs:
+        _, idx_left  = tree.query(p_left,  k=min(neighbor_k + 1, len(pts_array)))
+        _, idx_right = tree.query(p_right, k=min(neighbor_k + 1, len(pts_array)))
+        nb_left  = pts_array[[i for i in idx_left  if not np.allclose(pts_array[i], p_left)]]
+        nb_right = pts_array[[i for i in idx_right if not np.allclose(pts_array[i], p_right)]]
+
+        n_pts = num_points_per_gap
+        if avg_spacing is not None and avg_spacing > 0:
+            n_pts = max(3, int(dist / avg_spacing) + 1)
+
+        curve = cubic_bezier_fill_gap(
+            p_left, p_right,
+            num_points=n_pts,
+            neighbors_left=nb_left,
+            neighbors_right=nb_right,
+            slice_axis_idx=slice_axis_idx
+        )
+        curves.append({
+            'points': curve,
+            'axis_val': axis_val,
+            'p_left': p_left.copy(),
+            'p_right': p_right.copy(),
+        })
+
+    return curves
+
+
+def _resample_curve_3d(curve_pts, n_target):
+    """Resample a 3D curve to exactly n_target points via arc-length interpolation."""
+    pts = np.asarray(curve_pts)
+    if len(pts) == n_target:
+        return pts.copy()
+    if len(pts) < 2:
+        return np.tile(pts[0], (n_target, 1)) if len(pts) >= 1 else np.zeros((n_target, 3))
+
+    diffs = np.diff(pts, axis=0)
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total = cum[-1]
+    if total < 1e-15:
+        return np.tile(pts[0], (n_target, 1))
+
+    targets = np.linspace(0, total, n_target)
+    resampled = np.empty((n_target, 3))
+    for i, tl in enumerate(targets):
+        idx = min(np.searchsorted(cum, tl, side='right') - 1, len(pts) - 2)
+        idx = max(idx, 0)
+        frac = (tl - cum[idx]) / seg_lengths[idx] if seg_lengths[idx] > 1e-15 else 0.0
+        resampled[i] = (1 - frac) * pts[idx] + frac * pts[idx + 1]
+    return resampled
+
+
+def group_curves_by_hole(curves, slice_axis_idx, avg_spacing):
+    """
+    Group curves from adjacent slices that fill the same hole.
+    Two curves are grouped if their gap midpoints (in non-slice dimensions)
+    are within a proximity threshold.
+    """
+    if len(curves) < 2:
+        return []
+
+    other_cols = [c for c in (0, 1, 2) if c != slice_axis_idx]
+    sorted_curves = sorted(curves, key=lambda c: c['axis_val'])
+    max_dist = avg_spacing * 30
+
+    groups = []
+    assigned = set()
+
+    for i in range(len(sorted_curves)):
+        if i in assigned:
+            continue
+        group = [sorted_curves[i]]
+        assigned.add(i)
+
+        for j in range(i + 1, len(sorted_curves)):
+            if j in assigned:
+                continue
+            last = group[-1]
+            curr = sorted_curves[j]
+            mid_last = (last['p_left'][other_cols] + last['p_right'][other_cols]) / 2.0
+            mid_curr = (curr['p_left'][other_cols] + curr['p_right'][other_cols]) / 2.0
+            if np.linalg.norm(mid_curr - mid_last) < max_dist:
+                group.append(curr)
+                assigned.add(j)
+
+        if len(group) >= 2:
+            groups.append(group)
+
+    return groups
+
+
+def densify_between_curves(curve_groups, slice_axis_idx, avg_spacing):
+    """
+    Create intermediate curves and scatter uniform random points
+    between adjacent Bezier curves filling the same hole.
+
+    For each pair of adjacent curves:
+      1. Linearly interpolate intermediate curves (avg of endpoints)
+      2. Between all rails, bilinear-scatter random points at ~avg_spacing density
+
+    Returns
+    -------
+    extra_points : ndarray (M, 3)
+    """
+    extra = []
+
+    for group in curve_groups:
+        group.sort(key=lambda c: c['axis_val'])
+
+        for k in range(len(group) - 1):
+            pts1 = group[k]['points']
+            pts2 = group[k + 1]['points']
+
+            # Resample both curves to the same number of points
+            n_target = max(len(pts1), len(pts2), 10)
+            r1 = _resample_curve_3d(pts1, n_target)
+            r2 = _resample_curve_3d(pts2, n_target)
+
+            # Number of intermediate curves based on slice gap vs avg_spacing
+            slice_gap = abs(group[k + 1]['axis_val'] - group[k]['axis_val'])
+            n_interp = max(0, int(slice_gap / (avg_spacing * 2.0)) - 1)
+
+            # Build all rails: original + interpolated
+            rails = [r1]
+            for m in range(1, n_interp + 1):
+                t = m / (n_interp + 1)
+                rails.append((1 - t) * r1 + t * r2)
+            rails.append(r2)
+
+            # Add intermediate curve points (skip originals at index 0 and -1)
+            for m in range(1, len(rails) - 1):
+                extra.append(rails[m])
+
+            # Scatter uniform random points between adjacent rails
+            for r_idx in range(len(rails) - 1):
+                ra, rb = rails[r_idx], rails[r_idx + 1]
+                for p in range(len(ra) - 1):
+                    q00, q10, q01, q11 = ra[p], ra[p+1], rb[p], rb[p+1]
+                    # Approximate quad area via cross product of diagonals
+                    d1 = q11 - q00
+                    d2 = q10 - q01
+                    area = 0.5 * np.linalg.norm(np.cross(d1, d2))
+                    n_pts = int(area / (avg_spacing ** 2))
+                    if n_pts > 0:
+                        uv = np.random.uniform(0, 1, (n_pts, 2))
+                        u, v = uv[:, 0:1], uv[:, 1:2]
+                        pts = ((1-u)*(1-v)*q00 + u*(1-v)*q10 +
+                               (1-u)*v*q01 + u*v*q11)
+                        extra.append(pts)
+
+    if not extra:
+        return np.empty((0, 3))
+    return np.vstack(extra)
+
+
 def guess_axis_curvature(points, gaps, slice_axis_idx=0, neighbor_k=5):
     """
     Evaluates how "curved" a set of gaps are.
@@ -659,9 +828,42 @@ def process_point_cloud(points,
     
     # Select fill function based on fill_method
     if fill_method == 'bezier':
-        fill_fn = fill_all_gaps
         if verbose:
-            print(f"[Fill] Filling gaps with Cubic Bezier ...")
+            print(f"[Fill] Filling gaps with Cubic Bezier + Surface Densification ...")
+
+        # --- Axis 1: tracked fill + densify ---
+        curves_1 = fill_all_gaps_tracked(pts_clean, gaps_axis1,
+                                         num_points_per_gap=num_points_per_gap,
+                                         neighbor_k=neighbor_k,
+                                         slice_axis_idx=0,
+                                         avg_spacing=avg_point_spacing)
+        bezier_pts_1_pca = np.vstack([c['points'] for c in curves_1]) if curves_1 else np.empty((0, 3))
+
+        groups_1 = group_curves_by_hole(curves_1, 0, avg_point_spacing)
+        dense_1 = densify_between_curves(groups_1, 0, avg_point_spacing)
+        if len(dense_1) > 0:
+            if verbose:
+                print(f"[Densify] Axis 1: +{len(dense_1)} surface points")
+            bezier_pts_1_pca = np.vstack([bezier_pts_1_pca, dense_1])
+
+        # --- Axis 2: tracked fill + densify ---
+        if use_cross_hatch and gaps_axis2:
+            curves_2 = fill_all_gaps_tracked(pts_clean, gaps_axis2,
+                                             num_points_per_gap=num_points_per_gap,
+                                             neighbor_k=neighbor_k,
+                                             slice_axis_idx=1,
+                                             avg_spacing=avg_point_spacing)
+            bezier_pts_2_pca = np.vstack([c['points'] for c in curves_2]) if curves_2 else np.empty((0, 3))
+
+            groups_2 = group_curves_by_hole(curves_2, 1, avg_point_spacing)
+            dense_2 = densify_between_curves(groups_2, 1, avg_point_spacing)
+            if len(dense_2) > 0:
+                if verbose:
+                    print(f"[Densify] Axis 2: +{len(dense_2)} surface points")
+                bezier_pts_2_pca = np.vstack([bezier_pts_2_pca, dense_2])
+        else:
+            bezier_pts_2_pca = np.empty((0, 3))
+
     else:
         from comparative import fill_all_gaps_with_method
         if verbose:
@@ -669,19 +871,19 @@ def process_point_cloud(points,
         fill_fn = lambda pts, gaps, **kw: fill_all_gaps_with_method(
             pts, gaps, method=fill_method, **kw)
 
-    bezier_pts_1_pca = fill_fn(pts_clean, gaps_axis1,
-                               num_points_per_gap=num_points_per_gap,
-                               neighbor_k=neighbor_k,
-                               slice_axis_idx=0,
-                               avg_spacing=avg_point_spacing)
-    if use_cross_hatch and gaps_axis2:
-        bezier_pts_2_pca = fill_fn(pts_clean, gaps_axis2,
+        bezier_pts_1_pca = fill_fn(pts_clean, gaps_axis1,
                                    num_points_per_gap=num_points_per_gap,
                                    neighbor_k=neighbor_k,
-                                   slice_axis_idx=1,
+                                   slice_axis_idx=0,
                                    avg_spacing=avg_point_spacing)
-    else:
-        bezier_pts_2_pca = np.empty((0, 3))
+        if use_cross_hatch and gaps_axis2:
+            bezier_pts_2_pca = fill_fn(pts_clean, gaps_axis2,
+                                       num_points_per_gap=num_points_per_gap,
+                                       neighbor_k=neighbor_k,
+                                       slice_axis_idx=1,
+                                       avg_spacing=avg_point_spacing)
+        else:
+            bezier_pts_2_pca = np.empty((0, 3))
     timings['fill'] = _time.perf_counter() - t0
 
     # ---- Step 4: Inverse Transform back to Original Space ----

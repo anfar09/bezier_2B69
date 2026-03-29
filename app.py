@@ -10,7 +10,8 @@ from hole_filler import (process_point_cloud, apply_inverse_pca,
                          estimate_tangent_2d, find_apex_2d,
                          axis_col, compute_g1_angle)
 from metrics import (compute_all_metrics, chamfer_distance, surface_roughness,
-                     point_density_uniformity)
+                     point_density_uniformity, per_point_error, rmse,
+                     hausdorff_distance)
 
 # --- Page Config ---
 st.set_page_config(
@@ -18,24 +19,241 @@ st.set_page_config(
     page_icon="🔬", layout="wide", initial_sidebar_state="collapsed"
 )
 
-# --- CSS ---
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&family=Inter:wght@300;400;600&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', 'Sarabun', sans-serif; }
-.main { background-color: #F8FAFC; color: #1E293B; }
-:root { --primary: #3B82F6; --border: #E2E8F0; }
-.stTabs [data-baseweb="tab-list"] { gap: 6px; background-color: transparent; flex-wrap: wrap; }
-.stTabs [data-baseweb="tab"] { height: 46px; background-color: #FFF; border-radius: 10px 10px 0 0; padding: 0 18px; color: #64748B; border: 1px solid var(--border); font-weight: 500; font-size: 0.85rem; }
-.stTabs [aria-selected="true"] { background-color: #EFF6FF !important; color: var(--primary) !important; border-bottom: 3px solid var(--primary) !important; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-.title-main { font-size: 2.2rem; font-weight: 700; color: #0F172A; margin-bottom: 0; letter-spacing: -1px; }
-.step-header { font-size: 1.3rem; color: #1E293B; border-left: 5px solid var(--primary); padding-left: 15px; margin-top: 20px; margin-bottom: 12px; font-weight: 600; }
-.method-card { background: #FFF; padding: 18px; border-radius: 14px; border: 1px solid var(--border); box-shadow: 0 4px 6px -1px rgb(0 0 0/0.05); margin-bottom: 14px; }
-.stMetric { background: #FFF; padding: 16px; border-radius: 10px; border: 1px solid var(--border); box-shadow: 0 1px 3px 0 rgb(0 0 0/0.1); }
-.stButton>button { background: white; color: var(--primary); border: 2px solid var(--primary); padding: 8px 24px; border-radius: 10px; font-weight: 600; }
-.stButton>button:hover { background: var(--primary); color: white; box-shadow: 0 10px 15px -3px rgba(59,130,246,0.3); }
-</style>
-""", unsafe_allow_html=True)
+# --- Theme State ---
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "dark"
+
+def toggle_theme():
+    st.session_state["theme"] = "light" if st.session_state["theme"] == "dark" else "dark"
+
+is_dark = st.session_state["theme"] == "dark"
+
+# --- Theme-aware Plotly defaults ---
+def plotly_colors():
+    if is_dark:
+        return dict(
+            paper="#0F172A", plot="#1E293B", grid="#334155",
+            text="#E2E8F0", surface_bg="#1E293B",
+            card="#1E293B", accent="#60A5FA"
+        )
+    return dict(
+        paper="#FFFFFF", plot="#FAFBFC", grid="#E2E8F0",
+        text="#1E293B", surface_bg="#FFFFFF",
+        card="#FFFFFF", accent="#3B82F6"
+    )
+
+pc = plotly_colors()
+
+def themed_3d_layout(**overrides):
+    base = dict(
+        scene=dict(
+            aspectmode='data',
+            xaxis=dict(gridcolor=pc['grid'], backgroundcolor=pc['surface_bg'],
+                       color=pc['text'], showbackground=True),
+            yaxis=dict(gridcolor=pc['grid'], backgroundcolor=pc['surface_bg'],
+                       color=pc['text'], showbackground=True),
+            zaxis=dict(gridcolor=pc['grid'], backgroundcolor=pc['surface_bg'],
+                       color=pc['text'], showbackground=True),
+        ),
+        paper_bgcolor=pc['paper'], height=600,
+        margin=dict(l=0, r=0, t=0, b=0),
+        font=dict(color=pc['text']),
+        legend=dict(font=dict(color=pc['text']))
+    )
+    base.update(overrides)
+    return base
+
+def themed_2d_layout(**overrides):
+    base = dict(
+        paper_bgcolor=pc['paper'], plot_bgcolor=pc['plot'],
+        font=dict(color=pc['text']),
+        xaxis=dict(gridcolor=pc['grid'], color=pc['text']),
+        yaxis=dict(gridcolor=pc['grid'], color=pc['text']),
+    )
+    base.update(overrides)
+    return base
+
+# --- CSS Theme System ---
+THEME_CSS = {
+    "dark": """
+    :root {
+        --bg-primary: #0F172A; --bg-card: #1E293B; --bg-surface: #334155;
+        --text-primary: #F1F5F9; --text-secondary: #94A3B8; --text-muted: #64748B;
+        --accent: #60A5FA; --accent-rgb: 96,165,250; --accent-hover: #93C5FD;
+        --border: #334155; --border-light: #475569;
+        --success: #34D399; --danger: #F87171; --warning: #FBBF24;
+        --gradient-start: #1E293B; --gradient-end: #0F172A;
+        --shadow: rgba(0,0,0,0.4); --glow: rgba(96,165,250,0.15);
+        --metric-border: #3B82F6;
+    }
+    """,
+    "light": """
+    :root {
+        --bg-primary: #F8FAFC; --bg-card: #FFFFFF; --bg-surface: #F1F5F9;
+        --text-primary: #0F172A; --text-secondary: #64748B; --text-muted: #94A3B8;
+        --accent: #3B82F6; --accent-rgb: 59,130,246; --accent-hover: #2563EB;
+        --border: #E2E8F0; --border-light: #CBD5E1;
+        --success: #10B981; --danger: #EF4444; --warning: #F59E0B;
+        --gradient-start: #FFFFFF; --gradient-end: #F8FAFC;
+        --shadow: rgba(0,0,0,0.08); --glow: rgba(59,130,246,0.08);
+        --metric-border: #3B82F6;
+    }
+    """
+}
+
+COMMON_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Sarabun:wght@300;400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', 'Sarabun', sans-serif !important;
+}
+
+.main { background-color: var(--bg-primary) !important; color: var(--text-primary) !important; }
+.block-container { padding-top: 1.5rem !important; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px; background: transparent; flex-wrap: wrap;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 0;
+}
+.stTabs [data-baseweb="tab"] {
+    height: 44px; background: transparent; border-radius: 8px 8px 0 0;
+    padding: 0 20px; color: var(--text-secondary);
+    border: none; font-weight: 500; font-size: 0.85rem;
+    transition: all 0.2s ease;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--accent); background: var(--glow);
+}
+.stTabs [aria-selected="true"] {
+    background: var(--glow) !important;
+    color: var(--accent) !important;
+    border-bottom: 3px solid var(--accent) !important;
+    font-weight: 600;
+}
+
+/* Header */
+.app-header {
+    background: linear-gradient(135deg, var(--gradient-start), var(--bg-card));
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px 28px;
+    margin-bottom: 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    box-shadow: 0 4px 24px var(--shadow);
+}
+.app-header .title {
+    font-size: 1.8rem; font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.5px; margin: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.app-header .subtitle {
+    font-size: 0.9rem; color: var(--text-secondary); margin: 4px 0 0 0;
+}
+
+/* Cards */
+.glass-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    box-shadow: 0 4px 16px var(--shadow);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    margin-bottom: 14px;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.glass-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px var(--shadow);
+}
+
+.method-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 4px 12px var(--shadow);
+    margin-bottom: 14px;
+}
+
+/* Step headers */
+.step-header {
+    font-size: 1.2rem; color: var(--text-primary);
+    border-left: 4px solid var(--accent);
+    padding-left: 14px;
+    margin: 20px 0 12px 0;
+    font-weight: 600;
+}
+
+/* Metric cards */
+.metric-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--metric-border);
+    border-radius: 12px;
+    padding: 18px 16px;
+    text-align: center;
+    box-shadow: 0 2px 12px var(--shadow);
+    transition: transform 0.2s ease;
+}
+.metric-card:hover { transform: translateY(-3px); }
+.metric-card .metric-label {
+    font-size: 0.75rem; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-bottom: 6px; font-weight: 500;
+}
+.metric-card .metric-value {
+    font-size: 1.5rem; font-weight: 700;
+    color: var(--text-primary);
+}
+.metric-card .metric-delta {
+    font-size: 0.8rem; margin-top: 4px; font-weight: 500;
+}
+.metric-card .metric-delta.positive { color: var(--success); }
+.metric-card .metric-delta.negative { color: var(--danger); }
+
+.metric-card.accent-blue   { --metric-border: #3B82F6; }
+.metric-card.accent-green  { --metric-border: #10B981; }
+.metric-card.accent-orange { --metric-border: #F59E0B; }
+.metric-card.accent-red    { --metric-border: #EF4444; }
+.metric-card.accent-purple { --metric-border: #8B5CF6; }
+
+/* Buttons */
+.stButton>button {
+    background: transparent; color: var(--accent);
+    border: 2px solid var(--accent);
+    padding: 8px 24px; border-radius: 10px;
+    font-weight: 600; transition: all 0.2s ease;
+}
+.stButton>button:hover {
+    background: var(--accent); color: white;
+    box-shadow: 0 8px 20px rgba(var(--accent-rgb), 0.3);
+}
+
+/* Streamlit overrides */
+.stMetric { background: var(--bg-card) !important; border: 1px solid var(--border) !important; border-radius: 10px !important; }
+.stMetric label { color: var(--text-secondary) !important; }
+.stMetric [data-testid="stMetricValue"] { color: var(--text-primary) !important; }
+.stSelectbox label, .stTextInput label, .stSlider label, .stRadio label, .stCheckbox label {
+    color: var(--text-primary) !important;
+}
+.stMarkdown, .stMarkdown p, .stWrite { color: var(--text-primary) !important; }
+[data-testid="stSidebar"] { background: var(--bg-card) !important; }
+.stDataFrame { border-radius: 10px; overflow: hidden; }
+
+/* Section dividers */
+.section-divider {
+    border: none; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+    margin: 24px 0;
+}
+"""
+
+st.markdown(f"<style>{THEME_CSS[st.session_state['theme']]}{COMMON_CSS}</style>", unsafe_allow_html=True)
 
 # --- Data Loading ---
 HOLE_FOLDER = "Dataset/hole"
@@ -50,12 +268,17 @@ if "hf_result" not in st.session_state: st.session_state["hf_result"] = None
 if "hf_file" not in st.session_state: st.session_state["hf_file"] = None
 
 # --- Header ---
-col_t1, col_t2 = st.columns([3, 1])
-with col_t1:
-    st.markdown('<p class="title-main">3D Reconstruction Analysis</p>', unsafe_allow_html=True)
-    st.markdown('<p style="color:#64748B; font-size:1rem;">การเติมเต็มพื้นผิวและซ่อมแซมรูโหว่ด้วย Bezier Cross-Hatching</p>', unsafe_allow_html=True)
-
-with col_t2:
+col_h1, col_h2, col_h3 = st.columns([3, 1, 0.3])
+with col_h1:
+    st.markdown("""
+    <div class="app-header">
+        <div>
+            <p class="title">3D Reconstruction Analysis</p>
+            <p class="subtitle">การเติมเต็มพื้นผิวและซ่อมแซมรูโหว่ด้วย Bezier Cross-Hatching</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+with col_h2:
     if not hole_files:
         st.error("ไม่พบไฟล์ข้อมูลใน Dataset/hole/")
         st.stop()
@@ -71,17 +294,19 @@ with col_t2:
         st.session_state["hf_result"] = None
     points_raw = st.session_state["points_raw"]
 
-st.markdown("<br>", unsafe_allow_html=True)
+with col_h3:
+    theme_icon = "☀️" if is_dark else "🌙"
+    st.button(theme_icon, on_click=toggle_theme, key="theme_toggle", help="Toggle Light/Dark Theme")
 
 # =====================================================================
-# TABS  (reordered: intro → process → deep-dive → result → metrics)
+# TABS
 # =====================================================================
 tab_intro, tab_analysis, tab_deepdive, tab_result, tab_metrics = st.tabs([
     "📍 01. บทนำ",
     "⚙️ 02. ประมวลผล",
     "🔗 03. การเชื่อมต่อ",
     "💎 04. ผลลัพธ์",
-    "📐 05. Metrics",
+    "📐 05. Chamfer Distance",
 ])
 
 # =====================================================================
@@ -91,15 +316,17 @@ with tab_intro:
     col_l, col_r = st.columns([1, 2])
     with col_l:
         st.markdown('<p class="step-header">ภาพรวมของโครงการ</p>', unsafe_allow_html=True)
-        st.write("""
-        การซ่อมแซมพื้นผิว 3 มิติ (3D Surface Repair) เป็นส่วนสำคัญในงานอุตสาหกรรมสมัยใหม่
-        ช่วยให้เราสามารถกู้คืนโมเดลที่เสียหายจากการสแกน
-        
-        **หัวข้อหลัก:**
-        - **Data Cleaning:** การลบจุดรบกวน (SOR)
-        - **Geometric Alignment:** การจัดวาง PCA
-        - **Surface Generation:** การสร้างพื้นผิวใหม่ด้วย Cross-Hatching
-        """)
+        st.markdown("""
+        <div class="glass-card">
+        <b>🔬 3D Surface Repair</b><br><br>
+        การซ่อมแซมพื้นผิว 3 มิติ เป็นส่วนสำคัญในงานอุตสาหกรรมสมัยใหม่
+        ช่วยให้สามารถกู้คืนโมเดลที่เสียหายจากการสแกน<br><br>
+        <b>📋 ขั้นตอนหลัก:</b><br>
+        • <b>Data Cleaning:</b> การลบจุดรบกวน (SOR)<br>
+        • <b>Geometric Alignment:</b> การจัดวาง PCA<br>
+        • <b>Surface Generation:</b> Bezier Cross-Hatching + Surface Densification
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown('<p class="step-header">ตั้งค่าการแสดงผล</p>', unsafe_allow_html=True)
         p_size = st.slider("ขนาดจุด", 1.0, 5.0, 2.0)
         p_color = st.selectbox("โทนสี", ["Blues", "Greens", "Viridis", "Cividis"])
@@ -111,13 +338,7 @@ with tab_intro:
             marker=dict(size=p_size, color=points_raw[:, 2], colorscale=p_color, opacity=0.6),
             name="Raw Input"
         )])
-        fig1.update_layout(
-            scene=dict(aspectmode='data',
-                       xaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white'),
-                       yaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white'),
-                       zaxis=dict(gridcolor='#E2E8F0', backgroundcolor='white')),
-            margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="white", height=600
-        )
+        fig1.update_layout(**themed_3d_layout())
         st.plotly_chart(fig1, use_container_width=True)
 
 # =====================================================================
@@ -130,12 +351,13 @@ with tab_analysis:
         st.markdown("""
         <div class="method-card"><b>1. Statistical Removal (SOR)</b><br>กรองจุดที่ไม่ใช่ส่วนของพื้นผิวจริง</div>
         <div class="method-card"><b>2. Axis Alignment (PCA)</b><br>คำนวณ Variance เพื่อหาแกนหลัก</div>
+        <div class="method-card"><b>3. Surface Densification</b><br>เติมจุดระหว่าง Bezier curves เพื่อสร้างพื้นผิวสมจริง</div>
         """, unsafe_allow_html=True)
 
         st.markdown("### ⚙️ พารามิเตอร์")
         s_th = st.text_input("Slice Thickness", placeholder="Auto", key="s_th")
         g_th = st.text_input("Gap Threshold", placeholder="Auto", key="g_th")
-        
+
         if st.button("🔍 เริ่มประมวลผล", use_container_width=True):
             with st.spinner("กำลังวิเคราะห์..."):
                 s_val = float(s_th) if s_th.strip() else None
@@ -168,8 +390,7 @@ with tab_analysis:
                                                 line=dict(width=1, color='white')),
                     name="Hole Boundary"
                 ))
-            fig2.update_layout(scene=dict(aspectmode='data'), margin=dict(l=0, r=0, t=0, b=0),
-                               paper_bgcolor="white", height=600)
+            fig2.update_layout(**themed_3d_layout())
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("กรุณากด 'เริ่มประมวลผล'")
@@ -183,7 +404,6 @@ with tab_deepdive:
         st.markdown('<p class="step-header">🔗 กระบวนการเชื่อมต่อ (Bezier Curve Deep-Dive)</p>', unsafe_allow_html=True)
         st.write("เลือก Slice ที่พบรูโหว่ แล้วดูว่า Bezier Curve ถูกสร้างขึ้นมาเชื่อมจุดอย่างไร (มุมมอง 2D)")
 
-        # Group gaps by slice
         from collections import defaultdict
         gaps_1 = result.get('gaps_axis1', [])
         gaps_2 = result.get('gaps_axis2', [])
@@ -224,7 +444,6 @@ with tab_deepdive:
             with col_viz:
                 p_left_pca, p_right_pca, gap_dist, axis_val = gap_list[gap_idx]
 
-                # Determine slice axis
                 if "Axis X" in selected_slice: slice_axis = 'X'
                 elif "Axis Y" in selected_slice: slice_axis = 'Y'
                 else: slice_axis = 'Z'
@@ -234,25 +453,18 @@ with tab_deepdive:
                 mean_pt = result['mean_pt']
                 thickness = result['slice_thickness']
 
-                # Get points in this slice (PCA space)
                 col_idx = axis_col(slice_axis)
                 vals = pts_pca[:, col_idx]
                 half_t = thickness / 2.0
                 slice_mask = (vals >= axis_val - half_t) & (vals < axis_val + half_t)
                 slice_pts_pca = pts_pca[slice_mask]
 
-                # Determine 2D axes (the two axes that are NOT the slice axis)
                 axes_3d = [0, 1, 2]
                 axes_3d.remove(col_idx)
                 ax_h, ax_v = axes_3d[0], axes_3d[1]
                 axis_names = ['PCA-X', 'PCA-Y', 'PCA-Z']
 
                 # === TANGENT VIA LINEAR REGRESSION (polyfit) ===
-                # Fit a line through k adjacent surface points near each boundary.
-                # v_left always has +x (→ rightward into gap)
-                # v_right always has -x (← leftward into gap)
-                # This GUARANTEES the tangent rays converge (no divergence).
-                
                 p_l_2d = p_left_pca[[ax_h, ax_v]]
                 p_r_2d = p_right_pca[[ax_h, ax_v]]
 
@@ -260,7 +472,6 @@ with tab_deepdive:
                 sort_order = np.argsort(slice_2d_all[:, 0])
                 sorted_2d = slice_2d_all[sort_order]
 
-                # Find P0 and P3 positions in the sorted order
                 dists_to_p0 = np.linalg.norm(sorted_2d - p_l_2d, axis=1)
                 p0_idx = int(np.argmin(dists_to_p0))
 
@@ -269,7 +480,6 @@ with tab_deepdive:
 
                 n_adj = 5
 
-                # --- Left tangent: fit line through k points to the LEFT of P0 ---
                 k_left = min(n_adj, p0_idx)
                 if k_left >= 2:
                     left_pts = sorted_2d[p0_idx - k_left : p0_idx + 1]
@@ -285,13 +495,11 @@ with tab_deepdive:
                 else:
                     v_left = np.array([1.0, 0.0])
 
-                # --- Right tangent: fit line through k points to the RIGHT of P3 ---
                 k_right = min(n_adj, len(sorted_2d) - 1 - p3_idx)
                 if k_right >= 2:
                     right_pts = sorted_2d[p3_idx : p3_idx + k_right + 1]
                     coeffs_r = np.polyfit(right_pts[:, 0], right_pts[:, 1], deg=1)
                     slope_r = coeffs_r[0]
-                    # Into gap = leftward: (-1, -slope) preserves the slope relationship
                     v_right = np.array([-1.0, -slope_r])
                     v_right = v_right / np.linalg.norm(v_right)
                 elif k_right == 1:
@@ -303,9 +511,6 @@ with tab_deepdive:
                     v_right = np.array([-1.0, 0.0])
 
                 # === HERMITE-TO-BEZIER CONTROL POINTS ===
-                # P1 = P0 + (gap/3) * v_left  (always inside the gap)
-                # P2 = P3 + (gap/3) * v_right (always inside the gap)
-                # This ALWAYS works — no ray intersection needed.
                 hermite_scale = gap_dist / 3.0
 
                 P0 = p_l_2d
@@ -313,8 +518,6 @@ with tab_deepdive:
                 P2 = p_r_2d + hermite_scale * v_right
                 P3 = p_r_2d
 
-                # Virtual apex for display: intersection of control arms
-                # P0→P1 extended and P3→P2 extended
                 dir_01 = P1 - P0
                 dir_32 = P2 - P3
                 try:
@@ -328,16 +531,16 @@ with tab_deepdive:
                 v_left_scaled = v_left * arrow_scale
                 v_right_scaled = v_right * arrow_scale
 
-                # Compute Bezier curve in 2D then map to 3D
+                # Compute Bezier curve
                 t_vals = np.linspace(0.0, 1.0, n_curve_pts)[:, np.newaxis]
                 u = 1.0 - t_vals
                 curve_2d = u**3*P0 + 3*u**2*t_vals*P1 + 3*u*t_vals**2*P2 + t_vals**3*P3
-                
+
                 curve_pca = np.zeros((n_curve_pts, 3))
                 curve_pca[:, col_idx] = axis_val
                 curve_pca[:, ax_h] = curve_2d[:, 0]
                 curve_pca[:, ax_v] = curve_2d[:, 1]
-                
+
                 ctrl_pts_pca = np.zeros((4, 3))
                 ctrl_pts_pca[:, col_idx] = axis_val
                 ctrl_pts_pca[:, ax_h] = [P0[0], P1[0], P2[0], P3[0]]
@@ -346,15 +549,13 @@ with tab_deepdive:
                 # === BUILD 2D FIGURE ===
                 fig = go.Figure()
 
-                # Step 1+: All slice points (2D projection)
                 if len(slice_pts_pca) > 0:
                     fig.add_trace(go.Scatter(
                         x=slice_pts_pca[:, ax_h], y=slice_pts_pca[:, ax_v],
-                        mode='markers', marker=dict(size=5, color='#3B82F6', opacity=0.7),
+                        mode='markers', marker=dict(size=5, color=pc['accent'], opacity=0.7),
                         name=f"Slice Points ({len(slice_pts_pca)})"
                     ))
 
-                # Step 2+: Gap boundary + slope vectors
                 if "②" in step or "③" in step or "④" in step:
                     fig.add_trace(go.Scatter(
                         x=[P0[0], P3[0]], y=[P0[1], P3[1]],
@@ -365,13 +566,11 @@ with tab_deepdive:
                         textfont=dict(size=12, color='#EF4444'),
                         name="Gap Boundary"
                     ))
-                    # Dashed gap line
                     fig.add_trace(go.Scatter(
                         x=[P0[0], P3[0]], y=[P0[1], P3[1]],
                         mode='lines', line=dict(color='#EF4444', width=2, dash='dash'),
                         name=f"Gap (dist={gap_dist:.4f})"
                     ))
-                    # Slope vector arrows (v_l, v_r)
                     tip_l = P0 + v_left_scaled
                     tip_r = P3 + v_right_scaled
                     fig.add_trace(go.Scatter(
@@ -389,9 +588,7 @@ with tab_deepdive:
                         name="v_r (slope right)"
                     ))
 
-                # Step 3+: Control points (Hermite) + control arms
                 if "③" in step or "④" in step:
-                    # Control arms: P0→P1 and P3→P2 (showing Hermite construction)
                     fig.add_trace(go.Scatter(
                         x=[P0[0], P1[0]], y=[P0[1], P1[1]],
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
@@ -402,7 +599,6 @@ with tab_deepdive:
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
                         name="Control Arm (P3→P2)"
                     ))
-                    # Control points P1 and P2
                     fig.add_trace(go.Scatter(
                         x=[P1[0], P2[0]], y=[P1[1], P2[1]],
                         mode='markers+text',
@@ -414,7 +610,6 @@ with tab_deepdive:
                         name="Control Points (Hermite)"
                     ))
 
-                # Step 4: Bezier curve
                 if "④" in step:
                     fig.add_trace(go.Scatter(
                         x=curve_2d[:, 0], y=curve_2d[:, 1],
@@ -426,11 +621,13 @@ with tab_deepdive:
 
                 fig.update_layout(
                     xaxis_title=axis_names[ax_h], yaxis_title=axis_names[ax_v],
-                    xaxis=dict(scaleanchor="y", scaleratio=1, gridcolor='#F1F5F9'),
-                    yaxis=dict(gridcolor='#F1F5F9'),
-                    paper_bgcolor='white', plot_bgcolor='#FAFBFC',
+                    xaxis=dict(scaleanchor="y", scaleratio=1, gridcolor=pc['grid']),
+                    yaxis=dict(gridcolor=pc['grid']),
+                    paper_bgcolor=pc['paper'], plot_bgcolor=pc['plot'],
+                    font=dict(color=pc['text']),
                     height=550, margin=dict(l=60, r=20, t=30, b=60),
-                    legend=dict(orientation='h', yanchor='bottom', y=-0.2, xanchor='center', x=0.5),
+                    legend=dict(orientation='h', yanchor='bottom', y=-0.2, xanchor='center', x=0.5,
+                                font=dict(color=pc['text'])),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -493,7 +690,7 @@ with tab_result:
             orig = result['original_inlier_points']
             fill_1 = result['bezier_pts_axis1'] if show_axis1 else np.empty((0,3))
             fill_2 = result['bezier_pts_axis2'] if show_axis2 else np.empty((0,3))
-            
+
             n_show_1 = int(len(fill_1) * (progress / 100.0))
             n_show_2 = int(len(fill_2) * (progress / 100.0))
             active_1 = fill_1[:n_show_1]
@@ -514,11 +711,11 @@ with tab_result:
                     x=active_2[:, 0], y=active_2[:, 1], z=active_2[:, 2],
                     mode='markers', marker=dict(size=2.5, color='#F59E0B', opacity=0.9), name="Secondary (Loft)"
                 ))
-            fig3.update_layout(
-                scene=dict(aspectmode='data', xaxis=dict(showgrid=False), yaxis=dict(showgrid=False), zaxis=dict(showgrid=False)),
-                margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="white", height=700,
-                legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=1)
-            )
+            fig3.update_layout(**themed_3d_layout(
+                height=700,
+                legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=1,
+                            font=dict(color=pc['text']))
+            ))
             st.plotly_chart(fig3, use_container_width=True)
             if progress < 100:
                 st.caption(f"แสดงผล: {progress}%")
@@ -526,118 +723,207 @@ with tab_result:
         st.warning("กรุณาทำขั้นตอน Tab 02 ก่อน")
 
 # =====================================================================
-# TAB 5: METRICS — with Chamfer Distance
+# TAB 5: CHAMFER DISTANCE — 3D COMPARISON & METRICS
 # =====================================================================
 with tab_metrics:
     result = st.session_state.get("hf_result")
     if result:
-        st.markdown('<p class="step-header">📐 Quantitative Evaluation Metrics</p>', unsafe_allow_html=True)
+        st.markdown('<p class="step-header">📐 3D Chamfer Distance Analysis</p>', unsafe_allow_html=True)
 
-        # --- Pipeline metrics ---
-        metrics_data = compute_all_metrics(result)
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("📊 Gaps Detected", metrics_data.get('total_gaps_detected', 0))
-        col2.metric("🔵 Fill Points", f"{metrics_data.get('total_fill_points', 0):,}")
-        col3.metric("📈 Fill Rate", f"{metrics_data.get('fill_rate', 0):.1f}%")
-        col4.metric("⏱️ Total Time", f"{result.get('timings', {}).get('total', 0):.3f}s")
-
-        st.markdown("---")
-
-        # --- Chamfer Distance against ground truth ---
-        st.markdown("### 📏 Chamfer Distance (ค่าความถูกต้อง)")
-
-        # Try to find matching ground truth file in before/
-        gt_file = os.path.join(BEFORE_FOLDER, selected_file.replace("hole", "before"))
-        # Also try exact same name
-        gt_file_exact = os.path.join(BEFORE_FOLDER, selected_file)
-        # Also try "before.xyz" if current is "hole.xyz"
-        gt_file_default = os.path.join(BEFORE_FOLDER, "before.xyz")
-
+        # --- Ground Truth selection ---
         gt_path = None
-        if os.path.exists(gt_file):
-            gt_path = gt_file
-        elif os.path.exists(gt_file_exact):
-            gt_path = gt_file_exact
-        elif os.path.exists(gt_file_default) and "hole" in selected_file.lower():
-            gt_path = gt_file_default
-
-        # Let user also manually select
         if before_files:
-            manual_gt = st.selectbox("เลือกไฟล์ Ground Truth (before)", before_files, key="gt_select")
+            manual_gt = st.selectbox("🗂️ เลือกไฟล์ Ground Truth (before)", before_files, key="gt_select")
             gt_path = os.path.join(BEFORE_FOLDER, manual_gt)
+        else:
+            st.info("ไม่พบไฟล์ Ground Truth ใน Dataset/before/ — ใส่ไฟล์เพื่อคำนวณ Chamfer Distance")
 
         if gt_path and os.path.exists(gt_path):
             gt_pts = np.array(load_points_from_file(gt_path))
             merged_pts = result['merged_points']
             filled_pts = result.get('combined_bezier_pts', np.empty((0, 3)))
 
-            # Chamfer: merged (repaired) vs before (ground truth)
+            # === COMPUTE ALL METRICS ===
             cd_merged = chamfer_distance(merged_pts, gt_pts)
-            # Chamfer: hole (input) vs before (ground truth)
             cd_input = chamfer_distance(points_raw, gt_pts)
-
-            st.markdown("#### เปรียบเทียบความถูกต้อง")
-            cc1, cc2, cc3 = st.columns(3)
-            cc1.metric("CD (Input → GT)", f"{cd_input['symmetric']:.8f}",
-                       help="Chamfer Distance ระหว่าง input (มีรู) กับ ground truth")
-            cc2.metric("CD (Repaired → GT)", f"{cd_merged['symmetric']:.8f}",
-                       help="Chamfer Distance ระหว่างผลซ่อม กับ ground truth")
+            hd_merged = hausdorff_distance(merged_pts, gt_pts)
+            rmse_val = rmse(filled_pts, gt_pts) if len(filled_pts) > 0 else 0.0
             improvement = cd_input['symmetric'] - cd_merged['symmetric']
-            cc3.metric("Improvement", f"{improvement:.8f}",
-                       delta=f"{improvement:.8f}" if improvement > 0 else f"{improvement:.8f}",
-                       delta_color="normal")
+            imp_pct = (improvement / cd_input['symmetric'] * 100) if cd_input['symmetric'] > 1e-15 else 0
 
-            st.markdown("#### รายละเอียด Chamfer Distance")
-            cd_df = pd.DataFrame({
-                'Comparison': ['Input (hole) → GT', 'Repaired → GT'],
-                'CD Forward': [f"{cd_input['forward']:.8f}", f"{cd_merged['forward']:.8f}"],
-                'CD Backward': [f"{cd_input['backward']:.8f}", f"{cd_merged['backward']:.8f}"],
-                'CD Symmetric': [f"{cd_input['symmetric']:.8f}", f"{cd_merged['symmetric']:.8f}"],
-                'Points': [f"{len(points_raw):,}", f"{len(merged_pts):,}"],
-            })
-            st.dataframe(cd_df, use_container_width=True, hide_index=True)
+            # === METRIC CARDS ===
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-            # Bar chart comparison
-            fig_cd = go.Figure(data=[
-                go.Bar(name='Input (hole)', x=['Forward', 'Backward', 'Symmetric'],
-                       y=[cd_input['forward'], cd_input['backward'], cd_input['symmetric']],
-                       marker_color='#EF4444'),
-                go.Bar(name='Repaired', x=['Forward', 'Backward', 'Symmetric'],
-                       y=[cd_merged['forward'], cd_merged['backward'], cd_merged['symmetric']],
-                       marker_color='#10B981'),
-            ])
-            fig_cd.update_layout(
-                barmode='group', yaxis_title="Chamfer Distance",
-                paper_bgcolor="white", plot_bgcolor="#F8FAFC",
-                height=350, margin=dict(l=40, r=20, t=20, b=40),
-            )
-            st.plotly_chart(fig_cd, use_container_width=True)
-        else:
-            st.info("ไม่พบไฟล์ Ground Truth ใน Dataset/before/ — ใส่ไฟล์ before.xyz เพื่อคำนวณ Chamfer Distance")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            def metric_html(label, value, accent="blue", delta=None, delta_positive=True):
+                delta_html = ""
+                if delta is not None:
+                    cls = "positive" if delta_positive else "negative"
+                    arrow = "▲" if delta_positive else "▼"
+                    delta_html = f'<div class="metric-delta {cls}">{arrow} {delta}</div>'
+                return f"""
+                <div class="metric-card accent-{accent}">
+                    <div class="metric-label">{label}</div>
+                    <div class="metric-value">{value}</div>
+                    {delta_html}
+                </div>"""
 
-        st.markdown("---")
+            c1.markdown(metric_html("CD (Input→GT)", f"{cd_input['symmetric']:.6f}", "red"), unsafe_allow_html=True)
+            c2.markdown(metric_html("CD (Repaired→GT)", f"{cd_merged['symmetric']:.6f}", "green"), unsafe_allow_html=True)
+            c3.markdown(metric_html("Improvement", f"{imp_pct:.1f}%", "blue",
+                                    delta=f"{improvement:.6f}", delta_positive=improvement > 0), unsafe_allow_html=True)
+            c4.markdown(metric_html("RMSE (Fill pts)", f"{rmse_val:.6f}", "orange"), unsafe_allow_html=True)
+            c5.markdown(metric_html("Hausdorff", f"{hd_merged['symmetric']:.6f}", "purple"), unsafe_allow_html=True)
 
-        # --- Surface Quality ---
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown("### 🔍 Surface Quality")
-            quality_df = pd.DataFrame({
-                'Metric': ['Surface Roughness (Mean)', 'Surface Roughness (Std)',
-                           'Density Uniformity (CV)', 'Mean Point Spacing',
-                           'Original Points', 'Merged Points'],
-                'Value': [
-                    f"{metrics_data.get('surface_roughness_mean', 0):.6f}",
-                    f"{metrics_data.get('surface_roughness_std', 0):.6f}",
-                    f"{metrics_data.get('density_uniformity_cv', 0):.4f}",
-                    f"{metrics_data.get('mean_point_spacing', 0):.6f}",
-                    f"{metrics_data.get('original_points', 0):,}",
-                    f"{metrics_data.get('merged_points', 0):,}",
-                ]
-            })
-            st.dataframe(quality_df, use_container_width=True, hide_index=True)
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-        with col_right:
+            # === 3D ERROR HEATMAP ===
+            st.markdown("### 🌡️ 3D Error Heatmap — Per-Point Distance to Ground Truth")
+            st.caption("จุดซ่อมถูกลงสีตามระยะห่างจาก Ground Truth (เขียว=ใกล้=ดี, แดง=ไกล=ไม่ดี)")
+
+            col_heat, col_gt = st.columns(2)
+
+            with col_heat:
+                st.markdown("**Repaired — Error Heatmap**")
+                # Compute per-point errors for ALL merged points
+                errors_merged = per_point_error(merged_pts, gt_pts)
+
+                # Clamp for colorscale
+                p99 = np.percentile(errors_merged, 99) if len(errors_merged) > 0 else 1.0
+
+                fig_heat = go.Figure(data=[go.Scatter3d(
+                    x=merged_pts[:, 0], y=merged_pts[:, 1], z=merged_pts[:, 2],
+                    mode='markers',
+                    marker=dict(
+                        size=2.0,
+                        color=errors_merged,
+                        colorscale=[[0, '#10B981'], [0.3, '#FBBF24'], [0.6, '#F97316'], [1.0, '#EF4444']],
+                        cmin=0, cmax=p99,
+                        colorbar=dict(
+                            title=dict(text="Distance", font=dict(color=pc['text'])),
+                            tickfont=dict(color=pc['text']),
+                            len=0.6, thickness=15,
+                        ),
+                        opacity=0.9,
+                    ),
+                    name="Error",
+                    hovertemplate="x: %{x:.4f}<br>y: %{y:.4f}<br>z: %{z:.4f}<br>Error: %{marker.color:.6f}<extra></extra>"
+                )])
+                fig_heat.update_layout(**themed_3d_layout(height=550))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+            with col_gt:
+                st.markdown("**Ground Truth (Before)**")
+                fig_gt = go.Figure(data=[go.Scatter3d(
+                    x=gt_pts[:, 0], y=gt_pts[:, 1], z=gt_pts[:, 2],
+                    mode='markers',
+                    marker=dict(size=1.5, color='#60A5FA', opacity=0.5),
+                    name="Ground Truth"
+                )])
+                fig_gt.update_layout(**themed_3d_layout(height=550))
+                st.plotly_chart(fig_gt, use_container_width=True)
+
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+            # === ERROR DISTRIBUTION + DETAIL TABLE ===
+            col_hist, col_stats = st.columns([1.5, 1])
+
+            with col_hist:
+                st.markdown("### 📊 Error Distribution")
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(
+                    x=errors_merged,
+                    nbinsx=80,
+                    marker_color=pc['accent'],
+                    opacity=0.85,
+                    name="Per-point error"
+                ))
+                # Add vertical lines for statistics
+                mean_err = float(np.mean(errors_merged))
+                median_err = float(np.median(errors_merged))
+                fig_hist.add_vline(x=mean_err, line_dash="dash", line_color="#F59E0B",
+                                  annotation_text=f"Mean: {mean_err:.6f}",
+                                  annotation_font=dict(color="#F59E0B"))
+                fig_hist.add_vline(x=median_err, line_dash="dash", line_color="#10B981",
+                                  annotation_text=f"Median: {median_err:.6f}",
+                                  annotation_font=dict(color="#10B981"))
+                fig_hist.update_layout(
+                    **themed_2d_layout(),
+                    xaxis_title="Distance to GT",
+                    yaxis_title="Count",
+                    height=400,
+                    margin=dict(l=50, r=20, t=30, b=50),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+            with col_stats:
+                st.markdown("### 📋 Statistics")
+                p95 = float(np.percentile(errors_merged, 95))
+                p99_val = float(np.percentile(errors_merged, 99))
+                max_err = float(np.max(errors_merged))
+
+                stats_df = pd.DataFrame({
+                    'Statistic': ['Mean', 'Median', 'Std Dev', 'P95', 'P99', 'Max',
+                                  '─────────', 'Points (Input)', 'Points (Repaired)', 'Points (GT)',
+                                  'Fill Points'],
+                    'Value': [
+                        f"{mean_err:.8f}",
+                        f"{median_err:.8f}",
+                        f"{float(np.std(errors_merged)):.8f}",
+                        f"{p95:.8f}",
+                        f"{p99_val:.8f}",
+                        f"{max_err:.8f}",
+                        '─────────',
+                        f"{len(points_raw):,}",
+                        f"{len(merged_pts):,}",
+                        f"{len(gt_pts):,}",
+                        f"{len(filled_pts):,}",
+                    ]
+                })
+                st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+            # === CHAMFER DISTANCE DETAIL TABLE + BAR CHART ===
+            col_table, col_bar = st.columns([1, 1])
+
+            with col_table:
+                st.markdown("### 📏 Chamfer Distance — Detail")
+                cd_df = pd.DataFrame({
+                    'Metric': ['CD Forward', 'CD Backward', 'CD Symmetric',
+                               'Hausdorff Forward', 'Hausdorff Backward', 'Hausdorff Symmetric'],
+                    'Input → GT': [
+                        f"{cd_input['forward']:.8f}", f"{cd_input['backward']:.8f}", f"{cd_input['symmetric']:.8f}",
+                        "—", "—", "—"
+                    ],
+                    'Repaired → GT': [
+                        f"{cd_merged['forward']:.8f}", f"{cd_merged['backward']:.8f}", f"{cd_merged['symmetric']:.8f}",
+                        f"{hd_merged['forward']:.8f}", f"{hd_merged['backward']:.8f}", f"{hd_merged['symmetric']:.8f}",
+                    ],
+                })
+                st.dataframe(cd_df, use_container_width=True, hide_index=True)
+
+            with col_bar:
+                st.markdown("### 📊 Comparison")
+                fig_cd = go.Figure(data=[
+                    go.Bar(name='Input (hole)', x=['Forward', 'Backward', 'Symmetric'],
+                           y=[cd_input['forward'], cd_input['backward'], cd_input['symmetric']],
+                           marker_color='#EF4444'),
+                    go.Bar(name='Repaired', x=['Forward', 'Backward', 'Symmetric'],
+                           y=[cd_merged['forward'], cd_merged['backward'], cd_merged['symmetric']],
+                           marker_color='#10B981'),
+                ])
+                fig_cd.update_layout(
+                    **themed_2d_layout(),
+                    barmode='group', yaxis_title="Chamfer Distance",
+                    height=350, margin=dict(l=50, r=20, t=20, b=50),
+                    legend=dict(font=dict(color=pc['text']))
+                )
+                st.plotly_chart(fig_cd, use_container_width=True)
+
+            # === TIMING ===
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
             st.markdown("### ⏱️ Per-Step Timing")
             timings = result.get('timings', {})
             if timings:
@@ -645,11 +931,14 @@ with tab_metrics:
                 t_values = [v for k, v in timings.items() if k != 'total']
                 fig_t = go.Figure(data=[
                     go.Bar(x=t_labels, y=t_values,
-                           marker_color=['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'][:len(t_labels)],
-                           text=[f"{v:.4f}s" for v in t_values], textposition='auto')
+                           marker_color=[pc['accent'], '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'][:len(t_labels)],
+                           text=[f"{v:.4f}s" for v in t_values], textposition='auto',
+                           textfont=dict(color=pc['text']))
                 ])
-                fig_t.update_layout(yaxis_title="Seconds", paper_bgcolor="white", plot_bgcolor="#F8FAFC",
-                                    height=350, margin=dict(l=40, r=20, t=20, b=40))
+                fig_t.update_layout(**themed_2d_layout(), yaxis_title="Seconds",
+                                    height=300, margin=dict(l=50, r=20, t=20, b=50))
                 st.plotly_chart(fig_t, use_container_width=True)
+        else:
+            st.warning("ไม่พบไฟล์ Ground Truth — กรุณาเพิ่มไฟล์ใน Dataset/before/")
     else:
         st.warning("กรุณาทำขั้นตอน Tab 02 ก่อน")
