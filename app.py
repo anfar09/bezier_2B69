@@ -44,6 +44,10 @@ def plotly_colors():
 
 pc = plotly_colors()
 
+def to_pca(pts, result):
+    """Transform points from original space to PCA space."""
+    return (np.asarray(pts) - result['mean_pt']) @ result['rotation_matrix']
+
 def themed_3d_layout(**overrides):
     base = dict(
         scene=dict(
@@ -251,6 +255,12 @@ html, body, [class*="css"] {
     background: linear-gradient(90deg, transparent, var(--border), transparent);
     margin: 24px 0;
 }
+
+/* Hide Streamlit deploy toolbar */
+[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+header[data-testid="stHeader"] { display: none !important; }
+.block-container { padding-top: 1rem !important; }
 """
 
 st.markdown(f"<style>{THEME_CSS[st.session_state['theme']]}{COMMON_CSS}</style>", unsafe_allow_html=True)
@@ -376,8 +386,14 @@ with tab_analysis:
             m3.metric("ความหนาแน่นเฉลี่ย", f"{result['avg_point_spacing']:.4f}")
             m4.metric("เวลารวม", f"{result.get('timings', {}).get('total', 0):.2f}s")
 
-            orig = result['original_inlier_points']
-            bound = result['combined_boundary_pts']
+            coord_mode_2 = st.radio("🔄 ระบบพิกัด", ["Original", "PCA"], horizontal=True, key="coord_tab2")
+            use_pca_2 = coord_mode_2 == "PCA"
+
+            orig = to_pca(result['original_inlier_points'], result) if use_pca_2 else result['original_inlier_points']
+            bound_raw = result['combined_boundary_pts']
+            bound = to_pca(bound_raw, result) if (use_pca_2 and len(bound_raw) > 0) else bound_raw
+
+            axis_labels = dict(xaxis_title="PCA-X", yaxis_title="PCA-Y", zaxis_title="PCA-Z") if use_pca_2 else {}
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter3d(
                 x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
@@ -390,7 +406,10 @@ with tab_analysis:
                                                 line=dict(width=1, color='white')),
                     name="Hole Boundary"
                 ))
-            fig2.update_layout(**themed_3d_layout())
+            layout_2 = themed_3d_layout()
+            if axis_labels:
+                layout_2['scene'].update(axis_labels)
+            fig2.update_layout(**layout_2)
             st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("กรุณากด 'เริ่มประมวลผล'")
@@ -676,6 +695,7 @@ with tab_result:
             show_axis2 = st.checkbox(f"แสดงแกน {result['axis_2']} (Secondary)", value=True)
 
             st.markdown("---")
+            coord_mode_4 = st.radio("🔄 ระบบพิกัด", ["Original", "PCA"], horizontal=True, key="coord_tab4")
             progress = st.slider("Reconstruction Step", 0, 100, 100)
 
             st.markdown("---")
@@ -687,15 +707,22 @@ with tab_result:
                                use_container_width=True)
 
         with col_f2:
-            orig = result['original_inlier_points']
-            fill_1 = result['bezier_pts_axis1'] if show_axis1 else np.empty((0,3))
-            fill_2 = result['bezier_pts_axis2'] if show_axis2 else np.empty((0,3))
+            use_pca_4 = coord_mode_4 == "PCA"
+
+            orig_raw = result['original_inlier_points']
+            fill_1_raw = result['bezier_pts_axis1'] if show_axis1 else np.empty((0,3))
+            fill_2_raw = result['bezier_pts_axis2'] if show_axis2 else np.empty((0,3))
+
+            orig = to_pca(orig_raw, result) if use_pca_4 else orig_raw
+            fill_1 = to_pca(fill_1_raw, result) if (use_pca_4 and len(fill_1_raw) > 0) else fill_1_raw
+            fill_2 = to_pca(fill_2_raw, result) if (use_pca_4 and len(fill_2_raw) > 0) else fill_2_raw
 
             n_show_1 = int(len(fill_1) * (progress / 100.0))
             n_show_2 = int(len(fill_2) * (progress / 100.0))
             active_1 = fill_1[:n_show_1]
             active_2 = fill_2[:n_show_2]
 
+            axis_labels_4 = dict(xaxis_title="PCA-X", yaxis_title="PCA-Y", zaxis_title="PCA-Z") if use_pca_4 else {}
             fig3 = go.Figure()
             fig3.add_trace(go.Scatter3d(
                 x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
@@ -711,11 +738,14 @@ with tab_result:
                     x=active_2[:, 0], y=active_2[:, 1], z=active_2[:, 2],
                     mode='markers', marker=dict(size=2.5, color='#F59E0B', opacity=0.9), name="Secondary (Loft)"
                 ))
-            fig3.update_layout(**themed_3d_layout(
+            layout_4 = themed_3d_layout(
                 height=700,
                 legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=1,
                             font=dict(color=pc['text']))
-            ))
+            )
+            if axis_labels_4:
+                layout_4['scene'].update(axis_labels_4)
+            fig3.update_layout(**layout_4)
             st.plotly_chart(fig3, use_container_width=True)
             if progress < 100:
                 st.caption(f"แสดงผล: {progress}%")
@@ -751,56 +781,129 @@ with tab_metrics:
             improvement = cd_input['symmetric'] - cd_merged['symmetric']
             imp_pct = (improvement / cd_input['symmetric'] * 100) if cd_input['symmetric'] > 1e-15 else 0
 
-            # === METRIC CARDS ===
+            # === ERROR RATE HERO SECTION ===
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
+            # Compute error statistics early
+            errors_merged = per_point_error(merged_pts, gt_pts)
+            mean_err = float(np.mean(errors_merged))
+            median_err = float(np.median(errors_merged))
+            std_err = float(np.std(errors_merged))
+            p95 = float(np.percentile(errors_merged, 95))
+            p99_val = float(np.percentile(errors_merged, 99))
+            max_err = float(np.max(errors_merged))
+
+            # Error rate: % of fill points above a threshold
+            # ใช้เฉพาะจุดที่ "สร้างขึ้นมาใหม่" (filled_pts) ไม่ให้มาผสมรวมกับจุดเดิมฐานที่ตรงอยู่แล้ว 100%
+            if len(filled_pts) > 0:
+                errors_filled = per_point_error(filled_pts, gt_pts)
+                err_threshold = result.get('avg_point_spacing', 0.003) * 2.0
+                n_high_err = int(np.sum(errors_filled > err_threshold))
+                error_rate = (n_high_err / len(errors_filled)) * 100.0
+                total_filled = len(errors_filled)
+            else:
+                err_threshold = result.get('avg_point_spacing', 0.003) * 2.0
+                n_high_err = 0
+                error_rate = 0.0
+                total_filled = 0
+
+            accuracy_rate = 100.0 - error_rate
+
+            # Gauge color
+            if accuracy_rate >= 90:
+                gauge_color = "#10B981"
+                gauge_label = "ดีมาก"
+            elif accuracy_rate >= 70:
+                gauge_color = "#FBBF24"
+                gauge_label = "ปานกลาง"
+            else:
+                gauge_color = "#EF4444"
+                gauge_label = "ต้องปรับปรุง"
+
+            st.markdown(f"""
+<div class="glass-card" style="text-align:center; padding:28px;">
+    <div style="font-size:0.85rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">
+        🎯 ความแม่นยำในการซ่อมพื้นผิว (เฉพาะส่วนที่เติมใหม่)
+    </div>
+    <div style="font-size:3.5rem; font-weight:800; color:{gauge_color}; line-height:1.1;">
+        {accuracy_rate:.1f}%
+    </div>
+    <div style="font-size:1rem; color:{gauge_color}; font-weight:600; margin:4px 0 12px 0;">
+        {gauge_label}
+    </div>
+    <div style="font-size:0.8rem; color:var(--text-muted);">
+        จุดเติมใหม่ที่ตรงตาม GT (error ≤ {err_threshold:.4f}) = <b>{total_filled - n_high_err:,}</b> จาก <b>{total_filled:,}</b> จุด
+        &nbsp;|&nbsp; พื้นที่ส่วนเกินที่สร้างขึ้นผิดพลาด (Hallucinated) = <b style="color:#EF4444;">{n_high_err:,}</b> ({error_rate:.1f}%)
+    </div>
+</div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("", unsafe_allow_html=True)
+
+            # === METRIC CARDS WITH THAI DESCRIPTIONS ===
             c1, c2, c3, c4, c5 = st.columns(5)
-            def metric_html(label, value, accent="blue", delta=None, delta_positive=True):
+            def metric_html(label, value, desc, accent="blue", delta=None, delta_positive=True):
                 delta_html = ""
                 if delta is not None:
                     cls = "positive" if delta_positive else "negative"
                     arrow = "▲" if delta_positive else "▼"
                     delta_html = f'<div class="metric-delta {cls}">{arrow} {delta}</div>'
-                return f"""
-                <div class="metric-card accent-{accent}">
-                    <div class="metric-label">{label}</div>
-                    <div class="metric-value">{value}</div>
-                    {delta_html}
-                </div>"""
+                return f'''<div class="metric-card accent-{accent}">
+<div class="metric-label">{label}</div>
+<div class="metric-value">{value}</div>
+{delta_html}
+<div style="font-size:0.7rem; color:var(--text-muted); margin-top:8px; line-height:1.4;">{desc}</div>
+</div>'''
 
-            c1.markdown(metric_html("CD (Input→GT)", f"{cd_input['symmetric']:.6f}", "red"), unsafe_allow_html=True)
-            c2.markdown(metric_html("CD (Repaired→GT)", f"{cd_merged['symmetric']:.6f}", "green"), unsafe_allow_html=True)
-            c3.markdown(metric_html("Improvement", f"{imp_pct:.1f}%", "blue",
-                                    delta=f"{improvement:.6f}", delta_positive=improvement > 0), unsafe_allow_html=True)
-            c4.markdown(metric_html("RMSE (Fill pts)", f"{rmse_val:.6f}", "orange"), unsafe_allow_html=True)
-            c5.markdown(metric_html("Hausdorff", f"{hd_merged['symmetric']:.6f}", "purple"), unsafe_allow_html=True)
+            c1.markdown(metric_html(
+                "CD (Input→GT)", f"{cd_input['symmetric']:.6f}",
+                "ระยะห่างเฉลี่ยยกกำลังสอง ระหว่าง input (มีรู) กับ ground truth — ยิ่งสูง ยิ่งต่างจากต้นฉบับมาก",
+                "red"), unsafe_allow_html=True)
+            c2.markdown(metric_html(
+                "CD (Repaired→GT)", f"{cd_merged['symmetric']:.6f}",
+                "ระยะห่างเฉลี่ยยกกำลังสอง ระหว่างผลซ่อม กับ ground truth — ยิ่งต่ำ ยิ่งใกล้ต้นฉบับ",
+                "green"), unsafe_allow_html=True)
+            c3.markdown(metric_html(
+                "ดีขึ้น", f"{imp_pct:.1f}%",
+                "CD ลดลงกี่ % หลังซ่อม — ค่าบวก = ดีขึ้น, ค่าลบ = แย่ลง",
+                "blue", delta=f"{improvement:.6f}", delta_positive=improvement > 0), unsafe_allow_html=True)
+            c4.markdown(metric_html(
+                "RMSE (จุดเติม)", f"{rmse_val:.6f}",
+                "ค่าเฉลี่ยราก (Root Mean Square) ของระยะห่างจุดที่เติม ไปยัง GT ที่ใกล้ที่สุด",
+                "orange"), unsafe_allow_html=True)
+            c5.markdown(metric_html(
+                "Hausdorff", f"{hd_merged['symmetric']:.6f}",
+                "ระยะห่างสูงสุดที่เลวร้ายที่สุด — จุดที่ไกลจาก GT มากที่สุด (worst-case error)",
+                "purple"), unsafe_allow_html=True)
 
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
             # === 3D ERROR HEATMAP ===
-            st.markdown("### 🌡️ 3D Error Heatmap — Per-Point Distance to Ground Truth")
+            st.markdown("### 🌡️ แผนที่ความร้อน 3D — ระยะห่างแต่ละจุดจาก Ground Truth")
             st.caption("จุดซ่อมถูกลงสีตามระยะห่างจาก Ground Truth (เขียว=ใกล้=ดี, แดง=ไกล=ไม่ดี)")
+
+            coord_mode_5 = st.radio("🔄 ระบบพิกัด", ["Original", "PCA"], horizontal=True, key="coord_tab5")
+            use_pca_5 = coord_mode_5 == "PCA"
+
+            display_merged = to_pca(merged_pts, result) if use_pca_5 else merged_pts
+            display_gt = to_pca(gt_pts, result) if use_pca_5 else gt_pts
+            axis_labels_5 = dict(xaxis_title="PCA-X", yaxis_title="PCA-Y", zaxis_title="PCA-Z") if use_pca_5 else {}
 
             col_heat, col_gt = st.columns(2)
 
             with col_heat:
-                st.markdown("**Repaired — Error Heatmap**")
-                # Compute per-point errors for ALL merged points
-                errors_merged = per_point_error(merged_pts, gt_pts)
-
-                # Clamp for colorscale
-                p99 = np.percentile(errors_merged, 99) if len(errors_merged) > 0 else 1.0
+                st.markdown("**ผลซ่อม — Error Heatmap**")
+                p99_clamp = np.percentile(errors_merged, 99) if len(errors_merged) > 0 else 1.0
 
                 fig_heat = go.Figure(data=[go.Scatter3d(
-                    x=merged_pts[:, 0], y=merged_pts[:, 1], z=merged_pts[:, 2],
+                    x=display_merged[:, 0], y=display_merged[:, 1], z=display_merged[:, 2],
                     mode='markers',
                     marker=dict(
-                        size=2.0,
-                        color=errors_merged,
+                        size=2.0, color=errors_merged,
                         colorscale=[[0, '#10B981'], [0.3, '#FBBF24'], [0.6, '#F97316'], [1.0, '#EF4444']],
-                        cmin=0, cmax=p99,
+                        cmin=0, cmax=p99_clamp,
                         colorbar=dict(
-                            title=dict(text="Distance", font=dict(color=pc['text'])),
+                            title=dict(text="ระยะห่าง", font=dict(color=pc['text'])),
                             tickfont=dict(color=pc['text']),
                             len=0.6, thickness=15,
                         ),
@@ -809,90 +912,96 @@ with tab_metrics:
                     name="Error",
                     hovertemplate="x: %{x:.4f}<br>y: %{y:.4f}<br>z: %{z:.4f}<br>Error: %{marker.color:.6f}<extra></extra>"
                 )])
-                fig_heat.update_layout(**themed_3d_layout(height=550))
+                layout_heat = themed_3d_layout(height=550)
+                if axis_labels_5:
+                    layout_heat['scene'].update(axis_labels_5)
+                fig_heat.update_layout(**layout_heat)
                 st.plotly_chart(fig_heat, use_container_width=True)
 
             with col_gt:
-                st.markdown("**Ground Truth (Before)**")
+                st.markdown("**ต้นฉบับ — Ground Truth (Before)**")
                 fig_gt = go.Figure(data=[go.Scatter3d(
-                    x=gt_pts[:, 0], y=gt_pts[:, 1], z=gt_pts[:, 2],
+                    x=display_gt[:, 0], y=display_gt[:, 1], z=display_gt[:, 2],
                     mode='markers',
                     marker=dict(size=1.5, color='#60A5FA', opacity=0.5),
                     name="Ground Truth"
                 )])
-                fig_gt.update_layout(**themed_3d_layout(height=550))
+                layout_gt = themed_3d_layout(height=550)
+                if axis_labels_5:
+                    layout_gt['scene'].update(axis_labels_5)
+                fig_gt.update_layout(**layout_gt)
                 st.plotly_chart(fig_gt, use_container_width=True)
 
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-            # === ERROR DISTRIBUTION + DETAIL TABLE ===
+            # === ERROR DISTRIBUTION + STATS ===
             col_hist, col_stats = st.columns([1.5, 1])
 
             with col_hist:
-                st.markdown("### 📊 Error Distribution")
+                st.markdown("### 📊 การกระจายตัวของ Error")
+                st.caption("แสดงจำนวนจุดที่มี error ในแต่ละช่วง — กองซ้ายมาก = ดี (error ต่ำ)")
                 fig_hist = go.Figure()
                 fig_hist.add_trace(go.Histogram(
-                    x=errors_merged,
-                    nbinsx=80,
-                    marker_color=pc['accent'],
-                    opacity=0.85,
+                    x=errors_merged, nbinsx=80,
+                    marker_color=pc['accent'], opacity=0.85,
                     name="Per-point error"
                 ))
-                # Add vertical lines for statistics
-                mean_err = float(np.mean(errors_merged))
-                median_err = float(np.median(errors_merged))
                 fig_hist.add_vline(x=mean_err, line_dash="dash", line_color="#F59E0B",
-                                  annotation_text=f"Mean: {mean_err:.6f}",
+                                  annotation_text=f"ค่าเฉลี่ย: {mean_err:.6f}",
                                   annotation_font=dict(color="#F59E0B"))
                 fig_hist.add_vline(x=median_err, line_dash="dash", line_color="#10B981",
-                                  annotation_text=f"Median: {median_err:.6f}",
+                                  annotation_text=f"มัธยฐาน: {median_err:.6f}",
                                   annotation_font=dict(color="#10B981"))
+                fig_hist.add_vline(x=err_threshold, line_dash="dot", line_color="#EF4444",
+                                  annotation_text=f"Threshold: {err_threshold:.4f}",
+                                  annotation_font=dict(color="#EF4444"))
                 fig_hist.update_layout(
                     **themed_2d_layout(),
-                    xaxis_title="Distance to GT",
-                    yaxis_title="Count",
-                    height=400,
-                    margin=dict(l=50, r=20, t=30, b=50),
+                    xaxis_title="ระยะห่างจาก GT", yaxis_title="จำนวนจุด",
+                    height=400, margin=dict(l=50, r=20, t=30, b=50),
                     showlegend=False,
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
 
             with col_stats:
-                st.markdown("### 📋 Statistics")
-                p95 = float(np.percentile(errors_merged, 95))
-                p99_val = float(np.percentile(errors_merged, 99))
-                max_err = float(np.max(errors_merged))
-
+                st.markdown("### 📋 สถิติ Error")
                 stats_df = pd.DataFrame({
-                    'Statistic': ['Mean', 'Median', 'Std Dev', 'P95', 'P99', 'Max',
-                                  '─────────', 'Points (Input)', 'Points (Repaired)', 'Points (GT)',
-                                  'Fill Points'],
-                    'Value': [
-                        f"{mean_err:.8f}",
-                        f"{median_err:.8f}",
-                        f"{float(np.std(errors_merged)):.8f}",
-                        f"{p95:.8f}",
-                        f"{p99_val:.8f}",
-                        f"{max_err:.8f}",
-                        '─────────',
-                        f"{len(points_raw):,}",
-                        f"{len(merged_pts):,}",
-                        f"{len(gt_pts):,}",
-                        f"{len(filled_pts):,}",
+                    'สถิติ': [
+                        'ค่าเฉลี่ย (Mean)', 'มัธยฐาน (Median)', 'ส่วนเบี่ยงเบน (Std)',
+                        'Percentile 95', 'Percentile 99', 'สูงสุด (Max)',
+                        '──────────',
+                        'Accuracy Rate', 'Error Rate',
+                        '──────────',
+                        'จุด Input', 'จุดหลังซ่อม', 'จุด Ground Truth', 'จุดที่เติม',
+                    ],
+                    'ค่า': [
+                        f"{mean_err:.8f}", f"{median_err:.8f}", f"{std_err:.8f}",
+                        f"{p95:.8f}", f"{p99_val:.8f}", f"{max_err:.8f}",
+                        '──────────',
+                        f"✅ {accuracy_rate:.1f}%", f"❌ {error_rate:.1f}%",
+                        '──────────',
+                        f"{len(points_raw):,}", f"{len(merged_pts):,}",
+                        f"{len(gt_pts):,}", f"{len(filled_pts):,}",
                     ]
                 })
                 st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-            # === CHAMFER DISTANCE DETAIL TABLE + BAR CHART ===
+            # === CHAMFER DISTANCE DETAIL + BAR CHART ===
             col_table, col_bar = st.columns([1, 1])
 
             with col_table:
-                st.markdown("### 📏 Chamfer Distance — Detail")
+                st.markdown("### 📏 Chamfer Distance — รายละเอียด")
+                st.caption("""
+                **Forward** = แต่ละจุดใน A หาจุดที่ใกล้ที่สุดใน B → เฉลี่ย |
+                **Backward** = กลับกัน |
+                **Symmetric** = รวมทั้งสองทิศทาง
+                """)
                 cd_df = pd.DataFrame({
-                    'Metric': ['CD Forward', 'CD Backward', 'CD Symmetric',
-                               'Hausdorff Forward', 'Hausdorff Backward', 'Hausdorff Symmetric'],
+                    'ตัวชี้วัด': [
+                        'CD Forward (A→B)', 'CD Backward (B→A)', 'CD Symmetric (รวม)',
+                        'Hausdorff Forward', 'Hausdorff Backward', 'Hausdorff Symmetric'],
                     'Input → GT': [
                         f"{cd_input['forward']:.8f}", f"{cd_input['backward']:.8f}", f"{cd_input['symmetric']:.8f}",
                         "—", "—", "—"
@@ -905,12 +1014,12 @@ with tab_metrics:
                 st.dataframe(cd_df, use_container_width=True, hide_index=True)
 
             with col_bar:
-                st.markdown("### 📊 Comparison")
+                st.markdown("### 📊 เปรียบเทียบ Input vs Repaired")
                 fig_cd = go.Figure(data=[
-                    go.Bar(name='Input (hole)', x=['Forward', 'Backward', 'Symmetric'],
+                    go.Bar(name='ก่อนซ่อม (Input)', x=['Forward', 'Backward', 'Symmetric'],
                            y=[cd_input['forward'], cd_input['backward'], cd_input['symmetric']],
                            marker_color='#EF4444'),
-                    go.Bar(name='Repaired', x=['Forward', 'Backward', 'Symmetric'],
+                    go.Bar(name='หลังซ่อม (Repaired)', x=['Forward', 'Backward', 'Symmetric'],
                            y=[cd_merged['forward'], cd_merged['backward'], cd_merged['symmetric']],
                            marker_color='#10B981'),
                 ])
@@ -922,9 +1031,52 @@ with tab_metrics:
                 )
                 st.plotly_chart(fig_cd, use_container_width=True)
 
-            # === TIMING ===
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-            st.markdown("### ⏱️ Per-Step Timing")
+
+            # === METRIC EXPLANATION ===
+            st.markdown("### 📖 อธิบายตัวชี้วัด")
+            ex1, ex2 = st.columns(2)
+            with ex1:
+                st.markdown("""
+                <div class="method-card">
+                <b>📏 Chamfer Distance (CD)</b><br>
+                วัดว่า point cloud สองชุดใกล้กันแค่ไหน โดยหาจุดที่ใกล้ที่สุดของแต่ละจุด แล้วเฉลี่ยระยะทาง²<br><br>
+                <b>สูตร:</b> CD = (1/|A|) Σ min‖a−b‖² + (1/|B|) Σ min‖b−a‖²<br>
+                <b>ค่าดี:</b> ยิ่ง <b>ต่ำ</b> ยิ่งดี (0 = เหมือนกันทุกจุด)<br>
+                <b>หน่วย:</b> ระยะทาง² (เช่น mm²)
+                </div>
+
+                <div class="method-card">
+                <b>📐 RMSE (Root Mean Square Error)</b><br>
+                วัดค่าเฉลี่ยของ "ความผิดพลาด" ของจุดที่เติมใหม่ เทียบกับพื้นผิวต้นฉบับ<br><br>
+                <b>สูตร:</b> RMSE = √(Σ dᵢ² / N)<br>
+                <b>ค่าดี:</b> ยิ่ง <b>ต่ำ</b> ยิ่งดี<br>
+                <b>ใช้ดู:</b> จุดที่เราสร้างใหม่อยู่ใกล้พื้นผิวจริงแค่ไหน
+                </div>
+                """, unsafe_allow_html=True)
+            with ex2:
+                st.markdown(f"""
+                <div class="method-card">
+                <b>🎯 Accuracy / Error Rate</b><br>
+                เปอร์เซ็นต์ของจุดที่มี error ≤ threshold (2× avg spacing = {err_threshold:.4f})<br><br>
+                <b>Accuracy:</b> จุดที่อยู่ใกล้ GT พอ → ✅ {accuracy_rate:.1f}%<br>
+                <b>Error Rate:</b> จุดที่ไกลเกิน threshold → ❌ {error_rate:.1f}%<br>
+                <b>ค่าดี:</b> Accuracy ยิ่ง <b>สูง</b> ยิ่งดี
+                </div>
+
+                <div class="method-card">
+                <b>📏 Hausdorff Distance</b><br>
+                วัด "กรณีเลวร้ายที่สุด" — จุดที่ไกลจาก GT มากที่สุด<br><br>
+                <b>สูตร:</b> H = max(max min‖a−b‖, max min‖b−a‖)<br>
+                <b>ค่าดี:</b> ยิ่ง <b>ต่ำ</b> ยิ่งดี<br>
+                <b>ใช้ดู:</b> มีจุดหลุดออกไปไกลมากไหม (outlier detection)
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+            # === TIMING ===
+            st.markdown("### ⏱️ เวลาประมวลผลแต่ละขั้นตอน")
             timings = result.get('timings', {})
             if timings:
                 t_labels = [k.upper() for k in timings if k != 'total']
