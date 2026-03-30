@@ -32,8 +32,8 @@
 
 | Feature | รายละเอียด |
 |---|---|
-| 🎯 **Hermite-to-Bezier** | คำนวณ control points จาก tangent vectors โดยตรง — ไม่ต้อง ray intersection |
-| 📐 **Polyfit Tangent** | ใช้ Linear Regression (5 จุด) หา tangent ที่ robust, ไม่ diverge |
+| 🎯 **PCA Tangent + Apex** | คำนวณ tangent จาก PCA eigenvector → หา apex ด้วย ray intersection → สร้าง control points |
+| 📐 **Auto Curve Tension** | ปรับ tension อัตโนมัติตาม bulge ratio เพื่อลด wobbling |
 | 🧩 **Surface Densification** | สร้างเส้นกลาง + scatter จุดสุ่มสม่ำเสมอระหว่าง Bezier curves |
 | 🌙 **Light/Dark Theme** | UI สลับ theme ได้ทันที พร้อม glassmorphism design |
 | 🌡️ **3D Error Heatmap** | Chamfer Distance แสดงผลเป็น 3D heatmap บน point cloud จริง |
@@ -99,8 +99,8 @@ PCA Points → หา k-NN mean distance → ตัดจุดที่ > μ + 
 Cleaned Points → cKDTree → avg_spacing → slice_thickness, gap_threshold
 ```
 - **avg_point_spacing**: ค่าเฉลี่ยระยะห่างระหว่างจุดที่ใกล้ที่สุด (k=2)
-- **slice_thickness**: `avg_spacing × 3.0` — ความหนาของแต่ละ slice
-- **gap_threshold**: `avg_spacing × 3.0` — ระยะที่ถือว่าเป็น "รู"
+- **slice_thickness**: `avg_spacing × 2.0` — ความหนาของแต่ละ slice
+- **gap_threshold**: `avg_spacing × 5.0` — ระยะที่ถือว่าเป็น "รู"
 
 ### Step 4: Cross-Hatch Slicing + Gap Detection
 ```
@@ -114,23 +114,32 @@ PCA-Y Slicing:  ═══╤═══╤═══╤═══╤═══  → d
 
 ### Step 5: Bezier Curve Gap Filling
 
-#### 5.1 Tangent Estimation (Linear Regression)
+#### 5.1 Tangent Estimation (PCA Eigenvector)
 ```python
-# ฝั่งซ้าย: fit เส้นตรงผ่าน 5 จุดข้างๆ P0 → ได้ slope
-coeffs = np.polyfit(left_pts[:, 0], left_pts[:, 1], deg=1)
-v_left = [1.0, slope]  # ชี้ขวาเข้ารูเสมอ
+# ใช้ PCA บน neighbor points เพื่อหา tangent direction
+cov = np.cov(neighbors.T)
+evals, evecs = np.linalg.eigh(cov)
+tangent = evecs[:, -1]  # eigenvector with largest eigenvalue
 
-# ฝั่งขวา: fit เส้นตรงผ่าน 5 จุดข้างๆ P3 → ได้ slope  
-v_right = [-1.0, -slope]  # ชี้ซ้ายเข้ารูเสมอ
+# Orient tangent ให้ชี้เข้าหา gap
+if np.dot(tangent, gap_dir) < 0:
+    tangent = -tangent
 ```
-**ข้อดี**: `v_left` มี x เป็นบวกเสมอ, `v_right` มี x เป็นลบเสมอ → **รับประกัน convergence**
+**ข้อดี**: ใช้ PCA ทำให้ไม่มีปัญหา asymptote บนพื้นผิวแนวตั้ง
 
-#### 5.2 Hermite-to-Bezier Control Points
+#### 5.2 Apex Intersection → Auto-Tension Control Points
 ```
-P1 = P0 + (gap_length / 3) × v_left    ← control point ซ้าย (อยู่ในรูเสมอ)
-P2 = P3 + (gap_length / 3) × v_right   ← control point ขวา (อยู่ในรูเสมอ)
+apex = ray intersection ของ tangent ทั้งสองฝั่ง
+midpoint = (P0 + P3) / 2
+bulge_ratio = |apex - midpoint| / gap_length
+
+curve_tension = 0.666 (ปรับลดลงถ้า bulge_ratio > 0.05)
+
+P1 = curve_tension × apex + (1 - curve_tension) × P0
+P2 = curve_tension × apex + (1 - curve_tension) × P3
 ```
-ไม่ต้อง ray intersection → **ไม่มีกรณี parallel/diverge ที่จะทำให้ผิดพลาด**
+- Apex ถูก clamp ไม่ให้ offset เกิน 25% ของ gap_length
+- ถ้า rays ขนาน → fallback ใช้ perpendicular offset
 
 #### 5.3 Cubic Bezier Curve
 ```
@@ -162,21 +171,33 @@ PCA points → ×R^T + mean → Original space → Merge with distance check
 
 ## 🧮 อัลกอริทึมหลัก
 
-### ทำไมถึงใช้ Polyfit (Linear Regression)?
+### Tangent Estimation: PCA Eigenvector
 
-| วิธี | ปัญหา | แก้ไขได้? |
-|---|---|---|
-| **1 จุดข้างเคียง** | จุดติดกันมาก → tangent เพี้ยน | ❌ |
-| **PCA (eigenvalue)** | ดึง neighbor จาก slice อื่น → ผิดทิศ | ❌ |
-| **Average 5 vectors** | Diverge ได้ → เส้นไม่ตัดกัน | ❌ |
-| **Polyfit (เส้นตรง)** | Robust, ทิศตรง, convergence 100% | ✅ |
+อัลกอริทึมหลักใน `hole_filler.py` ใช้ **PCA-based tangent estimation** โดย:
 
-### ทำไมถึงใช้ Hermite แทน Apex Intersection?
+1. หา neighbor points ของจุดขอบรู
+2. กรองเฉพาะจุดที่อยู่ "ด้านหลัง" (ตรงข้ามกับ gap) เพื่อความแม่นยำ
+3. คำนวณ covariance matrix → eigenvector ที่มี eigenvalue สูงสุดคือ tangent direction
+4. ปรับทิศทางให้ชี้เข้าหา gap
 
-| วิธี | กรณี Diverge | กรณี Parallel | ข้อจำกัด |
-|---|---|---|---|
-| **Ray Intersection (Apex)** | Fallback ไม่ดี → apex ผิดที่ | Singular matrix | ต้องการ ray ตัดกันใน gap |
-| **Hermite-to-Bezier** | ✅ ไม่เกิด | ✅ ไม่เกิด | ไม่มี — ใช้ได้ทุกกรณี |
+**ข้อดี**: ไม่มีปัญหา math asymptote (infinity) บนพื้นผิวแนวตั้ง เหมือนกับ `polyfit`
+
+### Apex-Based Control Points + Auto Curve Tension
+
+แทนที่จะใช้ Hermite scaling ตรงๆ ระบบนี้:
+
+1. หา **apex** จาก ray intersection ของ tangent ทั้งสองฝั่ง
+2. คำนวณ **bulge ratio** (ความนูนเทียบกับ gap)
+3. ปรับ **curve tension** อัตโนมัติ (0.666 → 0.216) ตาม bulge ratio
+4. สร้าง control points: `Pi = tension × apex + (1 - tension) × endpoint`
+
+| สถานการณ์ | การจัดการ |
+|---|---|
+| **Rays ตัดกัน (ปกติ)** | ใช้ apex + clamp offset ≤ 25% gap |
+| **Rays ขนาน** | Fallback: perpendicular offset 30% gap |
+| **Bulge ratio สูง** | ลด tension เพื่อลด wobbling |
+
+> **หมายเหตุ**: Tab 03 (Deep-Dive 2D) ใน UI ใช้วิธี polyfit + Hermite-to-Bezier สำหรับการแสดงผลแบบ step-by-step เพื่อความเข้าใจง่าย ซึ่งแตกต่างจากอัลกอริทึมหลัก
 
 ---
 
@@ -187,22 +208,37 @@ bezier_2B69/
 ├── app.py               # Streamlit UI (Light/Dark theme, 5 tabs)
 ├── hole_filler.py       # Core algorithm (PCA → SOR → Slice → Bezier → Densify → Merge)
 ├── metrics.py           # Chamfer Distance, Hausdorff, RMSE, Surface Roughness
-├── slicer.py            # File I/O (.xyz, .txt, .pts)
-├── comparative.py       # Alternative fill methods (linear, spline, etc.)
+├── experiments.py       # Controlled experiments: synthetic holes, noise, ablation
+├── slicer.py            # File I/O (.xyz, .txt, .pts) + legacy slicing/hole detection
+├── variance.py          # Variance calculator สำหรับแต่ละแกน (standalone utility)
+├── patch.py             # Alternative Bezier fill implementation (PCA tangent + flat angle detection)
+├── SlicingAreabox.py    # Legacy: cuboid slicing bounding box (stdin-based)
+├── inside_point.py      # Utility: point-in-rectangle check
+├── comparative.py       # Placeholder สำหรับ alternative fill methods (ยังไม่ implement)
 ├── requirements.txt     # Dependencies
 ├── Dataset/
-│   ├── hole/            # Input: point clouds WITH holes (H1.xyz ~ H10.xyz)
-│   └── before/          # Ground truth: COMPLETE point clouds (H1.xyz ~ H10.xyz)
+│   ├── hole/            # Input: point clouds WITH holes (H1.xyz ~ H10.xyz, hole.xyz)
+│   └── before/          # Ground truth: COMPLETE point clouds (H1.xyz ~ H10.xyz, before.xyz)
 ```
 
 ### ไฟล์หลัก
 
 | ไฟล์ | บรรทัด | หน้าที่ |
 |---|---|---|
-| `hole_filler.py` | ~950 | Pipeline ทั้งหมด: PCA, SOR, Slicing, Gap Detection, Bezier Fill, Densification, Merge |
-| `app.py` | ~580 | Streamlit UI: 5 tabs, theme system, 2D/3D visualization, Chamfer Distance analysis |
+| `app.py` | ~1,100 | Streamlit UI: 5 tabs, theme system, 2D/3D visualization, Chamfer Distance analysis |
+| `hole_filler.py` | ~995 | Pipeline ทั้งหมด: PCA, SOR, Slicing, Gap Detection, Bezier Fill, Densification, Merge |
 | `metrics.py` | ~320 | Quantitative metrics: CD, Hausdorff, RMSE, Surface Roughness, Per-point Error |
-| `slicer.py` | ~60 | โหลดไฟล์ point cloud (.xyz, .txt, .pts) |
+| `experiments.py` | ~290 | Synthetic hole generation, noise injection, parameter sensitivity, ablation |
+| `slicer.py` | ~100 | โหลดไฟล์ point cloud (.xyz, .txt, .pts) + legacy slicing |
+
+### ไฟล์เสริม
+
+| ไฟล์ | บรรทัด | หน้าที่ |
+|---|---|---|
+| `variance.py` | ~90 | คำนวณ variance ของแต่ละแกน (standalone CLI + importable) |
+| `patch.py` | ~110 | Alternative Bezier implementation พร้อม flat angle threshold |
+| `SlicingAreabox.py` | ~56 | Legacy stdin-based cuboid slicing |
+| `inside_point.py` | ~18 | Point-in-rectangle utility function |
 
 ---
 
@@ -291,10 +327,15 @@ np.savetxt("output.xyz", merged, fmt='%.8f')
 ```python
 result = process_point_cloud(
     points,
-    slice_thickness=0.005,   # default: auto (avg_spacing × 3)
-    gap_threshold=0.008,     # default: auto (avg_spacing × 3)    
+    slice_thickness=0.005,   # default: auto (avg_spacing × 2)
+    gap_threshold=0.008,     # default: auto (avg_spacing × 5)    
     verbose=True
 )
+```
+
+### ใช้ผ่าน CLI
+```bash
+python hole_filler.py Dataset/hole/H1.xyz -o output.xyz --fill_method bezier
 ```
 
 ---
@@ -334,7 +375,7 @@ result = process_point_cloud(
 
 1. **H8 ได้ค่าแย่ลง (-12.4%)** — เมื่อรูมีขนาดเล็กมากและอยู่ในบริเวณ flat การเติมจุดอาจเพิ่ม noise มากกว่าแก้ปัญหา
 2. **Gap detection ขึ้นกับ sorting order** — ถ้าพื้นผิวมีรูปร่างซับซ้อน (undercut) การ sort 1D อาจพลาด gap
-3. **Linear tangent** — ใช้ polyfit degree 1 ซึ่งไม่จับ curvature ท้องถิ่น (degree 2 อาจดีกว่าถ้ามีจุดพอ)
+3. **comparative.py ยังไม่ implement** — ระบบรองรับ fill methods หลายแบบ (linear, bspline, nearest) แต่ยังไม่มี implementation จริง
 
 ### แนวทางพัฒนาต่อ
 
@@ -342,6 +383,7 @@ result = process_point_cloud(
 - **Adaptive density**: ปรับจำนวน scatter points ตาม curvature ท้องถิ่น
 - **Multi-scale slicing**: ใช้หลาย slice thickness สำหรับรูขนาดต่างกัน
 - **Normal estimation**: เพิ่มการคำนวณ surface normal เพื่อ constrain Bezier ให้อยู่บนพื้นผิว
+- **Implement comparative methods**: เพิ่ม linear, bspline, nearest ใน comparative.py
 
 ---
 
