@@ -305,16 +305,11 @@ PCA points → ×R^T + mean → Original space → Merge with distance check
 
 ```
 bezier_2B69/
-├── app.py               # Streamlit UI (Light/Dark theme, 5 tabs, 1,097 lines)
-├── hole_filler.py       # Core algorithm + CLI (PCA → SOR → Slice → Bezier → Densify → Merge, 995 lines)
-├── metrics.py           # Chamfer, Hausdorff, RMSE, Roughness, Density Uniformity (322 lines)
-├── experiments.py       # Synthetic holes, noise injection, ablation study (288 lines)
-├── slicer.py            # File I/O (.xyz, .txt, .pts) + legacy slicing/hole detection (98 lines)
-├── variance.py          # Variance calculator per axis (standalone CLI + importable, 89 lines)
-├── patch.py             # Alternative Bezier: flat angle threshold + force_linear fallback (108 lines)
-├── SlicingAreabox.py    # Legacy: cuboid slicing bounding box (stdin-based, 56 lines)
-├── inside_point.py      # Utility: point-in-rectangle check (18 lines)
-├── comparative.py       # Placeholder: alternative fill methods (ยังไม่ implement)
+├── app.py               # Streamlit UI (Light/Dark theme, 5 tabs)
+├── hole_filler.py       # Core algorithm + CLI (PCA → SOR → Slice → Bezier → Densify → Merge)
+├── metrics.py           # Chamfer, Hausdorff, RMSE, Roughness, Density Uniformity
+├── experiments.py       # Synthetic holes, noise injection, ablation study
+├── slicer.py            # File I/O (.xyz, .txt, .pts)
 ├── requirements.txt     # Dependencies
 ├── docs/
 │   └── banner.png       # README banner image
@@ -328,22 +323,13 @@ bezier_2B69/
 
 ### ไฟล์หลัก
 
-| ไฟล์ | บรรทัด | หน้าที่ |
-|---|---|---|
-| `app.py` | 1,097 | Streamlit UI: 5 tabs, theme system, 2D/3D visualization, Chamfer Distance analysis |
-| `hole_filler.py` | 995 | Pipeline ทั้งหมด: PCA, SOR, Slicing, Gap Detection, Bezier Fill, Densification, Merge + CLI |
-| `metrics.py` | 322 | Quantitative metrics: CD, Hausdorff, RMSE, Fill Rate, Surface Roughness, Density Uniformity, Per-point Error |
-| `experiments.py` | 288 | Synthetic hole generation, noise injection, parameter sensitivity, ablation study |
-| `slicer.py` | 98 | โหลดไฟล์ point cloud (.xyz, .txt, .pts) + legacy cuboid slicing + hole detection |
-
-### ไฟล์เสริม
-
-| ไฟล์ | บรรทัด | หน้าที่ |
-|---|---|---|
-| `variance.py` | 89 | คำนวณ variance ของแต่ละแกน (standalone CLI + importable, มี interactive mode) |
-| `patch.py` | 108 | Alternative Bezier: เพิ่ม flat angle threshold → ถ้ามุม ≥ 160° จะ fallback เป็น linear interpolation |
-| `SlicingAreabox.py` | 56 | Legacy stdin-based cuboid slicing |
-| `inside_point.py` | 18 | Point-in-rectangle utility function |
+| ไฟล์ | หน้าที่ |
+|---|---|
+| `app.py` | Streamlit UI: 5 tabs, theme system, 2D/3D visualization, Chamfer Distance analysis |
+| `hole_filler.py` | Pipeline ทั้งหมด: PCA, SOR, Slicing, Gap Detection, Bezier Fill, Densification, Merge + CLI |
+| `metrics.py` | Quantitative metrics: CD, Hausdorff, RMSE, Fill Rate, Surface Roughness, Density Uniformity, Per-point Error |
+| `experiments.py` | Synthetic hole generation, noise injection, parameter sensitivity, ablation study |
+| `slicer.py` | โหลดไฟล์ point cloud (.xyz, .txt, .pts) |
 
 </details>
 
@@ -457,7 +443,6 @@ result = process_point_cloud(
     use_sor=True,               # เปิด/ปิด SOR (สำหรับ ablation)
     use_pca=True,               # เปิด/ปิด PCA (สำหรับ ablation)
     use_cross_hatch=True,       # เปิด/ปิด dual-axis (single-axis ablation)
-    fill_method='bezier',       # 'bezier' | 'linear' | 'bspline' | 'nearest'
     verbose=True,
 )
 ```
@@ -483,7 +468,6 @@ result = process_point_cloud(
 | `mean_pt` | `ndarray (3,)` | PCA centroid |
 | `pts_clean_pca` | `ndarray` | จุดหลัง SOR ใน PCA space |
 | `timings` | `dict` | เวลาแต่ละขั้นตอน: `pca`, `sor`, `auto_tune`, `gap_detection`, `fill`, `merge`, `total` |
-| `fill_method` | `str` | วิธีที่ใช้เติม |
 | `inlier_mask` | `ndarray[bool]` | Mask จาก SOR |
 
 </details>
@@ -504,7 +488,6 @@ python hole_filler.py <input_file> [options]
 | `--neighbor_k` | 5 | k neighbors สำหรับ tangent |
 | `--sor_k` | 10 | k neighbors สำหรับ SOR |
 | `--sor_std` | 2.0 | SOR std multiplier |
-| `--fill_method` | `bezier` | วิธีเติม: `bezier`, `linear`, `bspline`, `nearest` |
 
 **ตัวอย่าง:**
 ```bash
@@ -580,7 +563,6 @@ python hole_filler.py input.xyz --sor_std 3.0
 |---|---|
 | ❌ **H8 ได้ค่าแย่ลง** | เมื่อรูมีขนาดเล็กมากและอยู่ในบริเวณ flat การเติมจุดอาจเพิ่ม noise มากกว่าแก้ปัญหา |
 | ⚠️ **Gap detection 1D** | ใช้ sorting 1D ตามแกน — ถ้าพื้นผิวมีรูปร่างซับซ้อน (undercut) อาจพลาด gap |
-| 🚧 **comparative.py ว่างเปล่า** | ระบบรองรับ fill methods หลายแบบ (linear, bspline, nearest) ใน CLI แต่ยังไม่มี implementation |
 | 📐 **Tab 03 ใช้ polyfit** | Deep-dive visualization ใช้ polyfit+Hermite ไม่ใช่ PCA tangent เหมือนอัลกอริทึมหลัก |
 
 ### แนวทางพัฒนาต่อ
@@ -589,7 +571,7 @@ python hole_filler.py input.xyz --sor_std 3.0
 - [ ] **Adaptive density**: ปรับ scatter points ตาม curvature ท้องถิ่น
 - [ ] **Multi-scale slicing**: ใช้หลาย slice thickness สำหรับรูขนาดต่างกัน
 - [ ] **Normal estimation**: เพิ่ม surface normal เพื่อ constrain Bezier
-- [ ] **Implement comparative.py**: เพิ่ม linear, bspline, nearest fill methods
+- [ ] **Implement alternative fill methods**: เพิ่ม linear, bspline, nearest เป็น alternative
 - [ ] **2D gap detection**: ใช้ 2D Delaunay แทน 1D sorting เพื่อจับ undercuts
 
 ---
@@ -625,14 +607,6 @@ pip install streamlit plotly numpy pandas scipy scikit-learn
 
 ต้องมีไฟล์ Ground Truth ในโฟลเดอร์ `Dataset/before/` ที่ชื่อตรงกับไฟล์ input (เช่น `H1.xyz`)  
 ถ้าไม่มี Ground Truth ก็ยังรัน pipeline ได้ แต่จะไม่มี metrics comparison
-
-</details>
-
-<details>
-<summary><strong>🟡 fill_method อื่นนอกจาก bezier ไม่ทำงาน</strong></summary>
-
-ปัจจุบัน `comparative.py` ยังเป็นไฟล์ว่าง จึงรองรับเฉพาะ `fill_method='bezier'`  
-การใช้ `linear`, `bspline`, หรือ `nearest` จะเกิด `ImportError`
 
 </details>
 

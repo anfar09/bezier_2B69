@@ -12,7 +12,6 @@ Provides metrics commonly used in research papers:
 
 import numpy as np
 from scipy.spatial import cKDTree
-import time
 
 
 # =============================================================================

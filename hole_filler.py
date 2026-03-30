@@ -11,7 +11,7 @@ Algorithm Pipeline:
 
 import numpy as np
 from scipy.spatial import cKDTree, KDTree
-from collections import defaultdict
+
 
 
 # =============================================================================
@@ -94,18 +94,6 @@ def pca_align(points):
 def apply_inverse_pca(points_rotated, rotation_matrix, mean_pt):
     """Map points back from PCA space to original 3D space."""
     return (points_rotated @ rotation_matrix.T) + mean_pt
-
-
-def compute_variance_along_axes(points):
-    """Return variance for each axis sorted descending (legacy wrapper)."""
-    pts = np.asarray(points)
-    variances = {
-        'X': float(np.var(pts[:, 0])),
-        'Y': float(np.var(pts[:, 1])),
-        'Z': float(np.var(pts[:, 2])),
-    }
-    sorted_axes = sorted(variances, key=variances.get, reverse=True)
-    return sorted_axes[0], sorted_axes[1], sorted_axes[2], variances
 
 
 AXIS_TO_COL = {'X': 0, 'Y': 1, 'Z': 2}
@@ -227,52 +215,6 @@ def process_axis(points, primary_axis, slice_thickness, gap_threshold):
     return all_gap_pairs_3d
 
 
-def deduplicate_gap_pairs(gap_pairs, min_distance):
-    """
-    Remove near-duplicate gap pairs whose boundary points are too close.
-
-    When slices are thin, the same hole edge gets detected in many
-    consecutive slices, producing almost-identical boundary pairs
-    that stack on top of each other.
-
-    Algorithm:
-    For each pair, compute its midpoint. If a midpoint is within
-    min_distance of an already-kept pair's midpoint, skip it.
-
-    Parameters
-    ----------
-    gap_pairs : list of (p_left, p_right, dist, axis_val)
-    min_distance : float, minimum spacing between kept pairs
-
-    Returns
-    -------
-    filtered : list of (p_left, p_right, dist, axis_val)
-    """
-    if len(gap_pairs) <= 1:
-        return gap_pairs
-
-    # Sort by gap distance descending so we keep the most significant gaps
-    sorted_pairs = sorted(gap_pairs, key=lambda x: x[2], reverse=True)
-
-    kept = []
-    kept_midpoints = []
-
-    for pair in sorted_pairs:
-        p_left, p_right = pair[0], pair[1]
-        mid = (np.asarray(p_left) + np.asarray(p_right)) / 2.0
-
-        # Check if too close to any already-kept pair
-        too_close = False
-        for km in kept_midpoints:
-            if np.linalg.norm(mid - km) < min_distance:
-                too_close = True
-                break
-
-        if not too_close:
-            kept.append(pair)
-            kept_midpoints.append(mid)
-
-    return kept
 
 
 def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
@@ -469,52 +411,6 @@ def merge_and_average_points(original, new_points, merge_distance=1e-3):
     return np.array(merged)
 
 
-def fill_all_gaps(points, gap_pairs, num_points_per_gap=20, neighbor_k=5, slice_axis_idx=0, avg_spacing=None):
-    """
-    Fill all detected gap pairs with Bezier curves.
-
-    Parameters
-    ----------
-    points           : array (N, 3), used only for neighbour lookups
-    gap_pairs        : list of (p_left, p_right, dist, axis_val)
-    num_points_per_gap : int
-    neighbor_k       : int
-
-    Returns
-    -------
-    filled_points : ndarray (M, 3)
-    """
-    pts_array = np.asarray(points)
-    tree = KDTree(pts_array)
-    filled = []
-
-    for p_left, p_right, dist, axis_val in gap_pairs:
-        # Find neighbours for tangent estimation
-        _, idx_left  = tree.query(p_left,  k=min(neighbor_k + 1, len(pts_array)))
-        _, idx_right = tree.query(p_right, k=min(neighbor_k + 1, len(pts_array)))
-
-        # Exclude the boundary points themselves from neighbour set
-        nb_left  = pts_array[[i for i in idx_left  if not np.allclose(pts_array[i], p_left)]]
-        nb_right = pts_array[[i for i in idx_right if not np.allclose(pts_array[i], p_right)]]
-
-        # Dynamic density check: long gaps get more points, short gaps get fewer points
-        n_pts = num_points_per_gap
-        if avg_spacing is not None and avg_spacing > 0:
-            n_pts = max(3, int(dist / avg_spacing) + 1)
-
-        curve = cubic_bezier_fill_gap(
-            p_left, p_right, 
-            num_points=n_pts,
-            neighbors_left=nb_left, 
-            neighbors_right=nb_right,
-            slice_axis_idx=slice_axis_idx
-        )
-        filled.append(curve)
-
-    if not filled:
-        return np.empty((0, 3))
-
-    return np.vstack(filled)
 
 
 # =============================================================================
@@ -686,44 +582,6 @@ def densify_between_curves(curve_groups, slice_axis_idx, avg_spacing):
     return np.vstack(extra)
 
 
-def guess_axis_curvature(points, gaps, slice_axis_idx=0, neighbor_k=5):
-    """
-    Evaluates how "curved" a set of gaps are.
-    Returns the average G1 angle. Lower angle = more curved (tighter corner).
-    """
-    if not gaps:
-        return 180.0
-    pts_array = np.asarray(points)
-    tree = KDTree(pts_array)
-    angles = []
-    
-    for p_left, p_right, dist, axis_val in gaps:
-        _, idx_left  = tree.query(p_left,  k=min(neighbor_k + 1, len(pts_array)))
-        _, idx_right = tree.query(p_right, k=min(neighbor_k + 1, len(pts_array)))
-
-        nb_left  = pts_array[[i for i in idx_left  if not np.allclose(pts_array[i], p_left)]]
-        nb_right = pts_array[[i for i in idx_right if not np.allclose(pts_array[i], p_right)]]
-        
-        other_cols = [c for c in (0, 1, 2) if c != slice_axis_idx]
-        p_l_2d = p_left[other_cols]
-        p_r_2d = p_right[other_cols]
-        
-        all_neighbors = []
-        if len(nb_left) > 0:
-            all_neighbors.append(nb_left[:, other_cols])
-        if len(nb_right) > 0:
-            all_neighbors.append(nb_right[:, other_cols])
-            
-        if all_neighbors:
-            slice_points_2d = np.vstack(all_neighbors)
-            v_l = estimate_tangent_2d(slice_points_2d, p_l_2d, opposite_2d=p_r_2d)
-            v_r = estimate_tangent_2d(slice_points_2d, p_r_2d, opposite_2d=p_l_2d)
-            angle = compute_g1_angle(v_l, v_r)
-            angles.append(angle)
-            
-    if not angles:
-        return 180.0
-    return float(np.mean(angles))
 
 
 # =============================================================================
@@ -740,17 +598,11 @@ def process_point_cloud(points,
                         use_sor=True,
                         use_pca=True,
                         use_cross_hatch=True,
-                        fill_method='bezier',
                         verbose=True):
     """
     Complete hole-filling pipeline with PCA alignment for robust detection.
 
-    Ablation parameters
-    -------------------
-    use_sor        : bool — enable Statistical Outlier Removal
-    use_pca        : bool — enable PCA alignment
-    use_cross_hatch: bool — if False, only use primary axis (no dual-axis)
-    fill_method    : str  — 'bezier', 'linear', 'bspline', 'nearest'
+    Ablation flags: use_sor, use_pca, use_cross_hatch
     """
     import time as _time
     timings = {}
@@ -825,65 +677,41 @@ def process_point_cloud(points,
 
     # ---- Step 3: Fill gaps ----
     t0 = _time.perf_counter()
-    
-    # Select fill function based on fill_method
-    if fill_method == 'bezier':
-        if verbose:
-            print(f"[Fill] Filling gaps with Cubic Bezier + Surface Densification ...")
+    if verbose:
+        print(f"[Fill] Filling gaps with Cubic Bezier + Surface Densification ...")
 
-        # --- Axis 1: tracked fill + densify ---
-        curves_1 = fill_all_gaps_tracked(pts_clean, gaps_axis1,
+    # --- Axis 1: tracked fill + densify ---
+    curves_1 = fill_all_gaps_tracked(pts_clean, gaps_axis1,
+                                     num_points_per_gap=num_points_per_gap,
+                                     neighbor_k=neighbor_k,
+                                     slice_axis_idx=0,
+                                     avg_spacing=avg_point_spacing)
+    bezier_pts_1_pca = np.vstack([c['points'] for c in curves_1]) if curves_1 else np.empty((0, 3))
+
+    groups_1 = group_curves_by_hole(curves_1, 0, avg_point_spacing)
+    dense_1 = densify_between_curves(groups_1, 0, avg_point_spacing)
+    if len(dense_1) > 0:
+        if verbose:
+            print(f"[Densify] Axis 1: +{len(dense_1)} surface points")
+        bezier_pts_1_pca = np.vstack([bezier_pts_1_pca, dense_1])
+
+    # --- Axis 2: tracked fill + densify ---
+    if use_cross_hatch and gaps_axis2:
+        curves_2 = fill_all_gaps_tracked(pts_clean, gaps_axis2,
                                          num_points_per_gap=num_points_per_gap,
                                          neighbor_k=neighbor_k,
-                                         slice_axis_idx=0,
+                                         slice_axis_idx=1,
                                          avg_spacing=avg_point_spacing)
-        bezier_pts_1_pca = np.vstack([c['points'] for c in curves_1]) if curves_1 else np.empty((0, 3))
+        bezier_pts_2_pca = np.vstack([c['points'] for c in curves_2]) if curves_2 else np.empty((0, 3))
 
-        groups_1 = group_curves_by_hole(curves_1, 0, avg_point_spacing)
-        dense_1 = densify_between_curves(groups_1, 0, avg_point_spacing)
-        if len(dense_1) > 0:
+        groups_2 = group_curves_by_hole(curves_2, 1, avg_point_spacing)
+        dense_2 = densify_between_curves(groups_2, 1, avg_point_spacing)
+        if len(dense_2) > 0:
             if verbose:
-                print(f"[Densify] Axis 1: +{len(dense_1)} surface points")
-            bezier_pts_1_pca = np.vstack([bezier_pts_1_pca, dense_1])
-
-        # --- Axis 2: tracked fill + densify ---
-        if use_cross_hatch and gaps_axis2:
-            curves_2 = fill_all_gaps_tracked(pts_clean, gaps_axis2,
-                                             num_points_per_gap=num_points_per_gap,
-                                             neighbor_k=neighbor_k,
-                                             slice_axis_idx=1,
-                                             avg_spacing=avg_point_spacing)
-            bezier_pts_2_pca = np.vstack([c['points'] for c in curves_2]) if curves_2 else np.empty((0, 3))
-
-            groups_2 = group_curves_by_hole(curves_2, 1, avg_point_spacing)
-            dense_2 = densify_between_curves(groups_2, 1, avg_point_spacing)
-            if len(dense_2) > 0:
-                if verbose:
-                    print(f"[Densify] Axis 2: +{len(dense_2)} surface points")
-                bezier_pts_2_pca = np.vstack([bezier_pts_2_pca, dense_2])
-        else:
-            bezier_pts_2_pca = np.empty((0, 3))
-
+                print(f"[Densify] Axis 2: +{len(dense_2)} surface points")
+            bezier_pts_2_pca = np.vstack([bezier_pts_2_pca, dense_2])
     else:
-        from comparative import fill_all_gaps_with_method
-        if verbose:
-            print(f"[Fill] Filling gaps with method: {fill_method} ...")
-        fill_fn = lambda pts, gaps, **kw: fill_all_gaps_with_method(
-            pts, gaps, method=fill_method, **kw)
-
-        bezier_pts_1_pca = fill_fn(pts_clean, gaps_axis1,
-                                   num_points_per_gap=num_points_per_gap,
-                                   neighbor_k=neighbor_k,
-                                   slice_axis_idx=0,
-                                   avg_spacing=avg_point_spacing)
-        if use_cross_hatch and gaps_axis2:
-            bezier_pts_2_pca = fill_fn(pts_clean, gaps_axis2,
-                                       num_points_per_gap=num_points_per_gap,
-                                       neighbor_k=neighbor_k,
-                                       slice_axis_idx=1,
-                                       avg_spacing=avg_point_spacing)
-        else:
-            bezier_pts_2_pca = np.empty((0, 3))
+        bezier_pts_2_pca = np.empty((0, 3))
     timings['fill'] = _time.perf_counter() - t0
 
     # ---- Step 4: Inverse Transform back to Original Space ----
@@ -945,7 +773,6 @@ def process_point_cloud(points,
         'slice_thickness': slice_thickness,
         'gap_threshold': gap_threshold,
         'timings': timings,
-        'fill_method': fill_method,
         'pts_clean_pca': pts_clean,
         'rotation_matrix': rotation_matrix,
         'mean_pt': mean_pt,
@@ -969,11 +796,8 @@ if __name__ == '__main__':
     parser.add_argument('--neighbor_k',       type=int,   default=5)
     parser.add_argument('--sor_k',            type=int,   default=10)
     parser.add_argument('--sor_std',          type=float, default=2.0)
-    parser.add_argument('--fill_method',      type=str,   default='bezier',
-                        choices=['bezier', 'linear', 'bspline', 'nearest'])
     args = parser.parse_args()
 
-    # Load points
     data = np.loadtxt(args.input)
     points = data[:, :3]
 
@@ -985,7 +809,6 @@ if __name__ == '__main__':
         neighbor_k=args.neighbor_k,
         sor_k=args.sor_k,
         sor_std_multiplier=args.sor_std,
-        fill_method=args.fill_method,
     )
 
     # Save merged output

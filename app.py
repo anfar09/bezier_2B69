@@ -6,12 +6,8 @@ import pandas as pd
 import io
 
 from slicer import load_points_from_file
-from hole_filler import (process_point_cloud, apply_inverse_pca,
-                         estimate_tangent_2d, find_apex_2d,
-                         axis_col, compute_g1_angle)
-from metrics import (compute_all_metrics, chamfer_distance, surface_roughness,
-                     point_density_uniformity, per_point_error, rmse,
-                     hausdorff_distance)
+from hole_filler import process_point_cloud, apply_inverse_pca, axis_col
+from metrics import chamfer_distance, per_point_error, rmse, hausdorff_distance
 
 # --- Page Config ---
 st.set_page_config(
