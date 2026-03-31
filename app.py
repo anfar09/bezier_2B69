@@ -783,10 +783,7 @@ with tab_metrics:
             improvement = cd_input['symmetric'] - cd_merged['symmetric']
             imp_pct = (improvement / cd_input['symmetric'] * 100) if cd_input['symmetric'] > 1e-15 else 0
 
-            # === ERROR RATE HERO SECTION ===
-            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-            # Compute error statistics early
+            # === COMPUTE ERROR STATISTICS ===
             errors_merged = per_point_error(merged_pts, gt_pts)
             mean_err = float(np.mean(errors_merged))
             median_err = float(np.median(errors_merged))
@@ -795,52 +792,8 @@ with tab_metrics:
             p99_val = float(np.percentile(errors_merged, 99))
             max_err = float(np.max(errors_merged))
 
-            # Error rate: % of fill points above a threshold
-            # ใช้เฉพาะจุดที่ "สร้างขึ้นมาใหม่" (filled_pts) ไม่ให้มาผสมรวมกับจุดเดิมฐานที่ตรงอยู่แล้ว 100%
-            if len(filled_pts) > 0:
-                errors_filled = per_point_error(filled_pts, gt_pts)
-                err_threshold = result.get('avg_point_spacing', 0.003) * 2.0
-                n_high_err = int(np.sum(errors_filled > err_threshold))
-                error_rate = (n_high_err / len(errors_filled)) * 100.0
-                total_filled = len(errors_filled)
-            else:
-                err_threshold = result.get('avg_point_spacing', 0.003) * 2.0
-                n_high_err = 0
-                error_rate = 0.0
-                total_filled = 0
-
-            accuracy_rate = 100.0 - error_rate
-
-            # Gauge color
-            if accuracy_rate >= 90:
-                gauge_color = "#10B981"
-                gauge_label = "ดีมาก"
-            elif accuracy_rate >= 70:
-                gauge_color = "#FBBF24"
-                gauge_label = "ปานกลาง"
-            else:
-                gauge_color = "#EF4444"
-                gauge_label = "ต้องปรับปรุง"
-
-            st.markdown(f"""
-<div class="glass-card" style="text-align:center; padding:28px;">
-    <div style="font-size:0.85rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">
-        🎯 ความแม่นยำในการซ่อมพื้นผิว (เฉพาะส่วนที่เติมใหม่)
-    </div>
-    <div style="font-size:3.5rem; font-weight:800; color:{gauge_color}; line-height:1.1;">
-        {accuracy_rate:.1f}%
-    </div>
-    <div style="font-size:1rem; color:{gauge_color}; font-weight:600; margin:4px 0 12px 0;">
-        {gauge_label}
-    </div>
-    <div style="font-size:0.8rem; color:var(--text-muted);">
-        จุดเติมใหม่ที่ตรงตาม GT (error ≤ {err_threshold:.4f}) = <b>{total_filled - n_high_err:,}</b> จาก <b>{total_filled:,}</b> จุด
-        &nbsp;|&nbsp; พื้นที่ส่วนเกินที่สร้างขึ้นผิดพลาด (Hallucinated) = <b style="color:#EF4444;">{n_high_err:,}</b> ({error_rate:.1f}%)
-    </div>
-</div>
-            """, unsafe_allow_html=True)
-
-            st.markdown("", unsafe_allow_html=True)
+            # === METRIC CARDS ===
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
             # === METRIC CARDS WITH THAI DESCRIPTIONS ===
             c1, c2, c3, c4, c5 = st.columns(5)
@@ -954,9 +907,7 @@ with tab_metrics:
                 fig_hist.add_vline(x=median_err, line_dash="dash", line_color="#10B981",
                                   annotation_text=f"มัธยฐาน: {median_err:.6f}",
                                   annotation_font=dict(color="#10B981"))
-                fig_hist.add_vline(x=err_threshold, line_dash="dot", line_color="#EF4444",
-                                  annotation_text=f"Threshold: {err_threshold:.4f}",
-                                  annotation_font=dict(color="#EF4444"))
+
                 fig_hist.update_layout(
                     **themed_2d_layout(),
                     xaxis_title="ระยะห่างจาก GT", yaxis_title="จำนวนจุด",
@@ -972,15 +923,11 @@ with tab_metrics:
                         'ค่าเฉลี่ย (Mean)', 'มัธยฐาน (Median)', 'ส่วนเบี่ยงเบน (Std)',
                         'Percentile 95', 'Percentile 99', 'สูงสุด (Max)',
                         '──────────',
-                        'Accuracy Rate', 'Error Rate',
-                        '──────────',
                         'จุด Input', 'จุดหลังซ่อม', 'จุด Ground Truth', 'จุดที่เติม',
                     ],
                     'ค่า': [
                         f"{mean_err:.8f}", f"{median_err:.8f}", f"{std_err:.8f}",
                         f"{p95:.8f}", f"{p99_val:.8f}", f"{max_err:.8f}",
-                        '──────────',
-                        f"✅ {accuracy_rate:.1f}%", f"❌ {error_rate:.1f}%",
                         '──────────',
                         f"{len(points_raw):,}", f"{len(merged_pts):,}",
                         f"{len(gt_pts):,}", f"{len(filled_pts):,}",
@@ -1058,14 +1005,6 @@ with tab_metrics:
                 """, unsafe_allow_html=True)
             with ex2:
                 st.markdown(f"""
-                <div class="method-card">
-                <b>🎯 Accuracy / Error Rate</b><br>
-                เปอร์เซ็นต์ของจุดที่มี error ≤ threshold (2× avg spacing = {err_threshold:.4f})<br><br>
-                <b>Accuracy:</b> จุดที่อยู่ใกล้ GT พอ → ✅ {accuracy_rate:.1f}%<br>
-                <b>Error Rate:</b> จุดที่ไกลเกิน threshold → ❌ {error_rate:.1f}%<br>
-                <b>ค่าดี:</b> Accuracy ยิ่ง <b>สูง</b> ยิ่งดี
-                </div>
-
                 <div class="method-card">
                 <b>📏 Hausdorff Distance</b><br>
                 วัด "กรณีเลวร้ายที่สุด" — จุดที่ไกลจาก GT มากที่สุด<br><br>
