@@ -290,7 +290,13 @@ def compute_g1_angle(v_left, v_right):
     return float(np.degrees(np.arccos(cos_angle)))
 
 def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
-    """Fills a gap in 2D space natively with Auto Curve Tension."""
+    """
+    Fills a gap in 2D using Apex-guided Hermite control points.
+
+    Uses PCA tangent DIRECTION for G1 continuity, with apex-derived SCALE
+    for adaptive curvature control. Falls back to gap/3 (standard Hermite)
+    when apex projection onto tangent is invalid.
+    """
     p_l = np.asarray(p_left)
     p_r = np.asarray(p_right)
     gap_vec = p_r - p_l
@@ -326,9 +332,22 @@ def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
         factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
         curve_tension = 0.666 - (factor * 0.45) # Drops to ~0.21, smoothing it out
     
+    # Project apex onto tangent rays to get G1-compatible scales
+    # (when apex is unclamped: scale = t from ray intersection → identical to old method)
+    scale_left = float(np.dot(apex - p_l, v_l))
+    scale_right = float(np.dot(apex - p_r, v_r))
+    
+    # Fallback to gap/3 (Hermite) if projection is invalid
+    hermite_fallback = gap_length / 3.0
+    if scale_left <= 0:
+        scale_left = hermite_fallback
+    if scale_right <= 0:
+        scale_right = hermite_fallback
+    
+    # Control points: tangent DIRECTION × apex-derived SCALE × tension
     P0 = p_l
-    P1 = curve_tension*apex + (1.0 - curve_tension)*p_l
-    P2 = curve_tension*apex + (1.0 - curve_tension)*p_r
+    P1 = P0 + curve_tension * scale_left * v_l
+    P2 = p_r + curve_tension * scale_right * v_r
     P3 = p_r
     
     t_vals = np.linspace(0.0, 1.0, num_points)[:, np.newaxis]

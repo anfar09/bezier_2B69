@@ -72,8 +72,7 @@ python hole_filler.py Dataset/hole/H1.xyz -o output.xyz
 
 | Feature | รายละเอียด |
 |---|---|
-| 🎯 **PCA Tangent + Apex** | คำนวณ tangent จาก PCA eigenvector → หา apex ด้วย ray intersection → สร้าง control points |
-| 📐 **Auto Curve Tension** | ปรับ tension อัตโนมัติ (0.666 → 0.216) ตาม bulge ratio เพื่อลด wobbling |
+| 🎯 **PCA Tangent + Apex-Guided Hermite** | tangent ทิศทางจาก PCA (G1) + ระยะจาก apex projection + fallback gap/3 |
 | 🧩 **Surface Densification** | สร้างเส้นกลาง + scatter จุดสุ่มสม่ำเสมอระหว่าง Bezier curves |
 | ⚡ **Auto-Tuning** | Slice thickness, gap threshold, curve density ปรับอัตโนมัติจาก avg_point_spacing |
 | 🌙 **Light/Dark Theme** | UI สลับ theme ได้ทันที พร้อม glassmorphism design |
@@ -214,19 +213,22 @@ if np.dot(tangent, gap_dir) < 0:
 ```
 **ข้อดี**: ใช้ PCA ทำให้ไม่มีปัญหา asymptote บนพื้นผิวแนวตั้ง (ต่างจาก polyfit)
 
-#### 5.2 Apex Intersection → Auto-Tension Control Points
+#### 5.2 Apex-Guided Hermite Control Points
 ```
 apex = ray intersection ของ tangent ทั้งสองฝั่ง
-midpoint = (P0 + P3) / 2
 bulge_ratio = |apex - midpoint| / gap_length
-
 curve_tension = 0.666 (ปรับลดลงถ้า bulge_ratio > 0.05)
 
-P1 = curve_tension × apex + (1 - curve_tension) × P0
-P2 = curve_tension × apex + (1 - curve_tension) × P3
+# ฉาย apex ลงบน tangent ray เพื่อหา scale (รักษาทิศทาง G1)
+scale_left  = dot(apex - P0, v_left)   # ถ้า ≤ 0 → fallback gap/3
+scale_right = dot(apex - P3, v_right)  # ถ้า ≤ 0 → fallback gap/3
+
+P1 = P0 + tension × scale_left × v_left
+P2 = P3 + tension × scale_right × v_right
 ```
-- Apex ถูก clamp ไม่ให้ offset เกิน 25% ของ gap_length
-- ถ้า rays ขนาน → fallback ใช้ perpendicular offset 30% gap
+- **ทิศทาง**: ตาม PCA tangent เสมอ → **G1 จริงทุกกรณี**
+- **ระยะ**: จาก apex projection → ปรับตัวตาม curvature ของพื้นผิว
+- **Fallback**: ถ้า projection ไม่ valid → ใช้ gap/3 (สูตร Hermite มาตรฐาน)
 
 #### 5.3 Cubic Bezier Curve
 ```
@@ -282,22 +284,24 @@ PCA points → ×R^T + mean → Original space → Merge with distance check
 
 **ข้อดี**: ไม่มีปัญหา math asymptote (infinity) บนพื้นผิวแนวตั้ง เหมือนกับ `polyfit`
 
-### Apex-Based Control Points + Auto Curve Tension
+### Apex-Guided Hermite Control Points + Auto Curve Tension
 
-แทนที่จะใช้ Hermite scaling ตรงๆ ระบบนี้:
+ใช้ **hybrid approach** รวมข้อดีของทั้ง Apex และ Hermite:
 
 1. หา **apex** จาก ray intersection ของ tangent ทั้งสองฝั่ง
-2. คำนวณ **bulge ratio** (ความนูนเทียบกับ gap)
+2. **ฉาย apex** ลงบน tangent ray เพื่อหา **scale** (รักษาทิศทาง → G1 จริง)
 3. ปรับ **curve tension** อัตโนมัติ (0.666 → 0.216) ตาม bulge ratio
-4. สร้าง control points: `Pi = tension × apex + (1 - tension) × endpoint`
+4. สร้าง control points: `Pi = endpoint + tension × scale × tangent`
+5. ถ้า projection ≤ 0 → **fallback ใช้ gap/3** (สูตร Hermite มาตรฐาน)
 
-| สถานการณ์ | การจัดการ |
-|---|---|
-| **Rays ตัดกัน (ปกติ)** | ใช้ apex + clamp offset ≤ 25% gap |
-| **Rays ขนาน** | Fallback: perpendicular offset 30% gap |
-| **Bulge ratio สูง** | ลด tension เพื่อลด wobbling |
+| สถานการณ์ | การจัดการ | G1 |
+|---|---|---|
+| **Rays ตัดกัน (ปกติ)** | scale = apex projection, ผลเหมือน apex ดั้งเดิม | ✅ |
+| **Apex ถูก clamp** | scale = ฤาย apex ที่ลดลง, แต่ทิศทางยังตาม tangent | ✅ |
+| **Rays ขนาน / projection ≤ 0** | Fallback: gap/3 (Hermite มาตรฐาน) | ✅ |
+| **Bulge ratio สูง** | ลด tension เพื่อลด wobbling | ✅ |
 
-> **📌 หมายเหตุ**: Tab 03 (การเชื่อมต่อ) ใน UI ใช้วิธี polyfit + Hermite-to-Bezier สำหรับการแสดงผลแบบ step-by-step เพื่อความเข้าใจง่าย ซึ่งแตกต่างจากอัลกอริทึมหลัก
+> **📌 หมายเหตุ**: ทั้งอัลกอริทึมหลัก (`hole_filler.py`) และ Tab 03 (การเชื่อมต่อ) ใน UI ใช้วิธี Apex-Guided Hermite เหมือนกัน
 
 ---
 
@@ -563,7 +567,6 @@ python hole_filler.py input.xyz --sor_std 3.0
 |---|---|
 | ❌ **H8 ได้ค่าแย่ลง** | เมื่อรูมีขนาดเล็กมากและอยู่ในบริเวณ flat การเติมจุดอาจเพิ่ม noise มากกว่าแก้ปัญหา |
 | ⚠️ **Gap detection 1D** | ใช้ sorting 1D ตามแกน — ถ้าพื้นผิวมีรูปร่างซับซ้อน (undercut) อาจพลาด gap |
-| 📐 **Tab 03 ใช้ polyfit** | Deep-dive visualization ใช้ polyfit+Hermite ไม่ใช่ PCA tangent เหมือนอัลกอริทึมหลัก |
 
 ### แนวทางพัฒนาต่อ
 
