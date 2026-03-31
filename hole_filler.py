@@ -253,31 +253,27 @@ def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
     return tangent
 
 def find_apex_2d(p_l, v_l, p_r, v_r, gap_length):
-    """2D ray intersection for the apex."""
+    """
+    2D ray intersection for the apex.
+    Returns apex point if rays intersect properly, None otherwise.
+    """
     A = np.column_stack([v_l, -v_r])
     b = p_r - p_l
-    midpoint = (p_l + p_r) / 2.0
     
     try:
         ts = np.linalg.solve(A, b)
         t, s = ts[0], ts[1]
         if t > 0 and s > 0:
             apex = p_l + t * v_l
-            # Clamp offset
+            # Check if apex is within reasonable range
+            midpoint = (p_l + p_r) / 2.0
             offset = np.linalg.norm(apex - midpoint)
-            max_offset = gap_length * 0.25
-            if offset > max_offset:
-                apex = midpoint + (apex - midpoint) * (max_offset / offset)
-            return apex
+            if offset <= gap_length * 0.5:
+                return apex
     except np.linalg.LinAlgError:
         pass
-        
-    # Parallel or backward intersection fallback
-    perp = np.array([-v_l[1], v_l[0]])
-    gap_vec = p_r - p_l
-    if np.dot(perp, gap_vec) < 0:
-        perp = -perp
-    return midpoint + perp * (gap_length * 0.3)
+    
+    return None
 
 def compute_g1_angle(v_left, v_right):
     """Compute G1 continuity angle in degrees."""
@@ -291,11 +287,12 @@ def compute_g1_angle(v_left, v_right):
 
 def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
     """
-    Fills a gap in 2D using Apex-guided Hermite control points.
+    Fills a gap using cubic Bezier with G1 continuity.
 
-    Uses PCA tangent DIRECTION for G1 continuity, with apex-derived SCALE
-    for adaptive curvature control. Falls back to gap/3 (standard Hermite)
-    when apex projection onto tangent is invalid.
+    Two modes:
+    - Apex mode: rays intersect properly → P1 = tension×apex + (1-tension)×P0
+    - Hermite mode: rays don't intersect → P1 = P0 + tension×(gap/3)×tangent
+    Both guarantee G1 continuity.
     """
     p_l = np.asarray(p_left)
     p_r = np.asarray(p_right)
@@ -303,7 +300,7 @@ def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
     gap_length = np.linalg.norm(gap_vec)
     
     if gap_length < 1e-12:
-        return np.array([p_l]), np.zeros(2), np.zeros(2), p_l, []
+        return np.array([p_l]), np.zeros(2), np.zeros(2), None, []
 
     # Filter neighbors near left and right
     tree = KDTree(slice_points)
@@ -316,39 +313,33 @@ def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
     v_l = estimate_tangent_2d(nb_l, p_l, opposite_2d=p_r)
     v_r = estimate_tangent_2d(nb_r, p_r, opposite_2d=p_l)
     
-    g1_angle = compute_g1_angle(v_l, v_r)
-        
     apex = find_apex_2d(p_l, v_l, p_r, v_r, gap_length)
     
-    # Auto Curve Tension: measure the natural bulge
-    midpoint = (p_l + p_r) / 2.0
-    offset = np.linalg.norm(apex - midpoint)
-    bulge_ratio = offset / gap_length if gap_length > 1e-12 else 0.0
-    
-    # If the slice's curvature (bulge) vastly exceeds the norm, pull it back to avoid wobbling
-    curve_tension = 0.666
-    if bulge_ratio > 0.05:
-        # Scale tension down as bulge ratio increases (from 0.05 up to 0.25 max offset)
-        factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
-        curve_tension = 0.666 - (factor * 0.45) # Drops to ~0.21, smoothing it out
-    
-    # Project apex onto tangent rays to get G1-compatible scales
-    # (when apex is unclamped: scale = t from ray intersection → identical to old method)
-    scale_left = float(np.dot(apex - p_l, v_l))
-    scale_right = float(np.dot(apex - p_r, v_r))
-    
-    # Fallback to gap/3 (Hermite) if projection is invalid
-    hermite_fallback = gap_length / 3.0
-    if scale_left <= 0:
-        scale_left = hermite_fallback
-    if scale_right <= 0:
-        scale_right = hermite_fallback
-    
-    # Control points: tangent DIRECTION × apex-derived SCALE × tension
     P0 = p_l
-    P1 = P0 + curve_tension * scale_left * v_l
-    P2 = p_r + curve_tension * scale_right * v_r
     P3 = p_r
+    
+    if apex is not None:
+        # === APEX MODE: rays intersect properly ===
+        # apex lies on ray P0 + t*v_l, so P1-P0 ∝ v_l → G1 correct
+        midpoint = (p_l + p_r) / 2.0
+        offset = np.linalg.norm(apex - midpoint)
+        bulge_ratio = offset / gap_length
+        
+        curve_tension = 0.666
+        if bulge_ratio > 0.05:
+            factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
+            curve_tension = 0.666 - (factor * 0.45)
+        
+        P1 = curve_tension * apex + (1.0 - curve_tension) * P0
+        P2 = curve_tension * apex + (1.0 - curve_tension) * P3
+    else:
+        # === HERMITE MODE: gap/3 along tangent ===
+        # P1 = P0 + (gap/3)×v_l → G1 correct by construction
+        hermite_scale = gap_length / 3.0
+        curve_tension = 0.666
+        
+        P1 = P0 + curve_tension * hermite_scale * v_l
+        P2 = P3 + curve_tension * hermite_scale * v_r
     
     t_vals = np.linspace(0.0, 1.0, num_points)[:, np.newaxis]
     u = 1.0 - t_vals

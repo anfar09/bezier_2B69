@@ -496,39 +496,37 @@ with tab_deepdive:
                 v_left = estimate_tangent_2d(nb_l, p_l_2d, opposite_2d=p_r_2d)
                 v_right = estimate_tangent_2d(nb_r, p_r_2d, opposite_2d=p_l_2d)
 
-                # === APEX INTERSECTION + AUTO CURVE TENSION ===
+                # === APEX OR GAP/3 ===
                 gap_length = np.linalg.norm(p_r_2d - p_l_2d)
                 apex_2d = find_apex_2d(p_l_2d, v_left, p_r_2d, v_right, gap_length)
                 g1_angle = compute_g1_angle(v_left, v_right)
 
-                midpoint_2d = (p_l_2d + p_r_2d) / 2.0
-                offset = np.linalg.norm(apex_2d - midpoint_2d)
-                bulge_ratio = offset / gap_length if gap_length > 1e-12 else 0.0
-
-                curve_tension = 0.666
-                if bulge_ratio > 0.05:
-                    factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
-                    curve_tension = 0.666 - (factor * 0.45)
-
-                # Project apex onto tangent rays for G1-compatible scales
-                scale_left = float(np.dot(apex_2d - p_l_2d, v_left))
-                scale_right = float(np.dot(apex_2d - p_r_2d, v_right))
-
-                hermite_fallback = gap_length / 3.0
-                used_fallback_l = scale_left <= 0
-                used_fallback_r = scale_right <= 0
-                if used_fallback_l:
-                    scale_left = hermite_fallback
-                if used_fallback_r:
-                    scale_right = hermite_fallback
-
-                # Control points: tangent direction × apex-derived scale × tension
                 P0 = p_l_2d
-                P1 = P0 + curve_tension * scale_left * v_left
-                P2 = p_r_2d + curve_tension * scale_right * v_right
                 P3 = p_r_2d
 
-                p_c_2d = apex_2d
+                if apex_2d is not None:
+                    # APEX MODE: rays intersect properly
+                    midpoint_2d = (p_l_2d + p_r_2d) / 2.0
+                    offset = np.linalg.norm(apex_2d - midpoint_2d)
+                    bulge_ratio = offset / gap_length if gap_length > 1e-12 else 0.0
+
+                    curve_tension = 0.666
+                    if bulge_ratio > 0.05:
+                        factor = np.clip((bulge_ratio - 0.05) / 0.20, 0.0, 1.0)
+                        curve_tension = 0.666 - (factor * 0.45)
+
+                    P1 = curve_tension * apex_2d + (1.0 - curve_tension) * P0
+                    P2 = curve_tension * apex_2d + (1.0 - curve_tension) * P3
+                    use_apex = True
+                else:
+                    # HERMITE MODE: gap/3 along tangent
+                    hermite_scale = gap_length / 3.0
+                    curve_tension = 0.666
+                    bulge_ratio = 0.0
+
+                    P1 = P0 + curve_tension * hermite_scale * v_left
+                    P2 = P3 + curve_tension * hermite_scale * v_right
+                    use_apex = False
 
                 arrow_scale = gap_dist * 0.6
                 v_left_scaled = v_left * arrow_scale
@@ -591,39 +589,40 @@ with tab_deepdive:
                         name="v_r (PCA tangent)"
                     ))
 
-                if "③" in step or "④" in step:
-                    # Show apex point
-                    fig.add_trace(go.Scatter(
-                        x=[apex_2d[0]], y=[apex_2d[1]],
-                        mode='markers+text',
-                        marker=dict(size=14, color='#06B6D4', symbol='star',
-                                    line=dict(width=2, color='white')),
-                        text=['Apex'], textposition='top center',
-                        textfont=dict(size=11, color='#06B6D4'),
-                        name="Apex (ray intersection)"
-                    ))
+                if "\u2462" in step or "\u2463" in step:
+                    if use_apex:
+                        fig.add_trace(go.Scatter(
+                            x=[apex_2d[0]], y=[apex_2d[1]],
+                            mode='markers+text',
+                            marker=dict(size=14, color='#06B6D4', symbol='star',
+                                        line=dict(width=2, color='white')),
+                            text=['Apex'], textposition='top center',
+                            textfont=dict(size=11, color='#06B6D4'),
+                            name="Apex (ray intersection)"
+                        ))
+                    cp_label = 'Apex' if use_apex else 'gap/3'
                     fig.add_trace(go.Scatter(
                         x=[P0[0], P1[0]], y=[P0[1], P1[1]],
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
-                        name="Control Arm (P0→P1)"
+                        name="Control Arm (P0\u2192P1)"
                     ))
                     fig.add_trace(go.Scatter(
                         x=[P3[0], P2[0]], y=[P3[1], P2[1]],
                         mode='lines', line=dict(color='#F59E0B', width=2, dash='dot'),
-                        name="Control Arm (P3→P2)"
+                        name="Control Arm (P3\u2192P2)"
                     ))
                     fig.add_trace(go.Scatter(
                         x=[P1[0], P2[0]], y=[P1[1], P2[1]],
                         mode='markers+text',
                         marker=dict(size=12, color='#F97316', symbol='cross',
                                     line=dict(width=1, color='#7C2D12')),
-                        text=['P1 (Apex)', 'P2 (Apex)'],
+                        text=[f'P1 ({cp_label})', f'P2 ({cp_label})'],
                         textposition='bottom center',
                         textfont=dict(size=10, color='#F97316'),
-                        name="Control Points (Apex-based)"
+                        name=f"Control Points ({cp_label})"
                     ))
 
-                if "④" in step:
+                if "\u2463" in step:
                     fig.add_trace(go.Scatter(
                         x=curve_2d[:, 0], y=curve_2d[:, 1],
                         mode='lines+markers',
@@ -645,37 +644,40 @@ with tab_deepdive:
                 st.plotly_chart(fig, use_container_width=True)
 
                 # Info card
-                p_c_pca = np.zeros(3)
-                p_c_pca[col_idx] = axis_val
-                p_c_pca[ax_h] = p_c_2d[0]
-                p_c_pca[ax_v] = p_c_2d[1]
-
                 p_left_orig = apply_inverse_pca(ctrl_pts_pca[0].reshape(1, 3), rot_mat, mean_pt)[0]
                 p_right_orig = apply_inverse_pca(ctrl_pts_pca[3].reshape(1, 3), rot_mat, mean_pt)[0]
-                p_c_orig = apply_inverse_pca(p_c_pca.reshape(1, 3), rot_mat, mean_pt)[0]
                 ctrl_orig = apply_inverse_pca(ctrl_pts_pca, rot_mat, mean_pt)
 
-                fallback_info_l = ' <span style="color:#F59E0B;">(fallback: gap/3)</span>' if used_fallback_l else ''
-                fallback_info_r = ' <span style="color:#F59E0B;">(fallback: gap/3)</span>' if used_fallback_r else ''
+                if use_apex:
+                    p_c_pca = np.zeros(3)
+                    p_c_pca[col_idx] = axis_val
+                    p_c_pca[ax_h] = apex_2d[0]
+                    p_c_pca[ax_v] = apex_2d[1]
+                    p_c_orig = apply_inverse_pca(p_c_pca.reshape(1, 3), rot_mat, mean_pt)[0]
+                    method_badge = '<span style="background:#06B6D4; color:white; padding:3px 10px; border-radius:6px; font-size:0.85rem;">⭐ Apex Mode</span>'
+                    method_detail = f"""<b>⭐ Apex:</b> [{p_c_orig[0]:.4f}, {p_c_orig[1]:.4f}, {p_c_orig[2]:.4f}]<br>
+                <b>Bulge Ratio:</b> {bulge_ratio:.4f}<br><br>
+                <b>📐 Control Points (tension×apex + (1-tension)×P):</b>"""
+                else:
+                    method_badge = '<span style="background:#8B5CF6; color:white; padding:3px 10px; border-radius:6px; font-size:0.85rem;">📐 Hermite (gap/3)</span>'
+                    method_detail = f"""<b>📐 Control Points (P + tension×(gap/3)×tangent):</b><br>
+                <b>Scale:</b> {gap_length/3.0:.4f} (gap/3)<br><br>
+                <b>ทำไมใช้ gap/3:</b> tangent rays ไม่ชนกัน หรือ apex ไกลเกิน"""
 
                 st.markdown(f"""
                 <div class="method-card">
-                <b>📝 Apex-Guided Hermite Bezier Construction</b><br>
+                <b>📝 Bezier Construction</b> &nbsp; {method_badge}<br><br>
                 <b>Slice:</b> {slice_axis}={axis_val:.4f} &nbsp;|&nbsp;
                 <b>Gap:</b> {gap_dist:.4f} &nbsp;|&nbsp;
-                <b>Curve Tension:</b> {curve_tension:.3f}<br><br>
+                <b>Curve Tension:</b> {curve_tension:.3f} &nbsp;|&nbsp;
+                <b>G1 Angle:</b> {g1_angle:.1f}°<br><br>
                 <b>🔹 Boundary Points:</b><br>
                 <b>P0 (pl_n):</b> [{p_left_orig[0]:.4f}, {p_left_orig[1]:.4f}, {p_left_orig[2]:.4f}]<br>
                 <b>P3 (pr_m):</b> [{p_right_orig[0]:.4f}, {p_right_orig[1]:.4f}, {p_right_orig[2]:.4f}]<br><br>
-                <b>⭐ Apex (ray intersection):</b> [{p_c_orig[0]:.4f}, {p_c_orig[1]:.4f}, {p_c_orig[2]:.4f}]<br>
-                <b>Bulge Ratio:</b> {bulge_ratio:.4f} &nbsp;|&nbsp;
-                <b>G1 Angle:</b> {g1_angle:.1f}°<br><br>
-                <b>📐 Control Points (P + tension × scale × tangent):</b><br>
-                <b>Scale Left:</b> {scale_left:.4f}{fallback_info_l} &nbsp;|&nbsp;
-                <b>Scale Right:</b> {scale_right:.4f}{fallback_info_r}<br>
+                {method_detail}<br>
                 <b>P1:</b> [{ctrl_orig[1,0]:.4f}, {ctrl_orig[1,1]:.4f}, {ctrl_orig[1,2]:.4f}]<br>
                 <b>P2:</b> [{ctrl_orig[2,0]:.4f}, {ctrl_orig[2,1]:.4f}, {ctrl_orig[2,2]:.4f}]<br>
-                <b>Tangent method:</b> PCA Eigenvector (k=10) &nbsp;|&nbsp;
+                <b>Tangent:</b> PCA Eigenvector (k=10) &nbsp;|&nbsp;
                 <b>Curve Points:</b> {n_curve_pts}
                 </div>
                 """, unsafe_allow_html=True)

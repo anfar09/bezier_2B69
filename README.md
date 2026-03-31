@@ -213,23 +213,22 @@ if np.dot(tangent, gap_dir) < 0:
 ```
 **ข้อดี**: ใช้ PCA ทำให้ไม่มีปัญหา asymptote บนพื้นผิวแนวตั้ง (ต่างจาก polyfit)
 
-#### 5.2 Apex-Guided Hermite Control Points
+#### 5.2 2-Mode Bezier Control Points
 ```
-apex = ray intersection ของ tangent ทั้งสองฝั่ง
-bulge_ratio = |apex - midpoint| / gap_length
+# โหมด 1: ⭐ Apex Mode
+# ถ้า tangent rays ตัดกันและระยะห่างไม่เกิน 50% ของ gap_length
+apex = ray intersection
 curve_tension = 0.666 (ปรับลดลงถ้า bulge_ratio > 0.05)
+P1 = tension * apex + (1-tension) * P0
+P2 = tension * apex + (1-tension) * P3
 
-# ฉาย apex ลงบน tangent ray เพื่อหา scale (รักษาทิศทาง G1)
-scale_left  = dot(apex - P0, v_left)   # ถ้า ≤ 0 → fallback gap/3
-scale_right = dot(apex - P3, v_right)  # ถ้า ≤ 0 → fallback gap/3
-
-P1 = P0 + tension × scale_left × v_left
-P2 = P3 + tension × scale_right × v_right
+# โหมด 2: 📐 Hermite Mode (Fallback)
+# ถ้าไม่ตัดกัน ถอยหลัง หรือระยะไกลเกินไป ใช้สูตร P + (gap/3)*tangent
+P1 = P0 + tension * (gap/3) * v_left
+P2 = P3 + tension * (gap/3) * v_right
 ```
-- **ทิศทาง**: ตาม PCA tangent เสมอ → **G1 จริงทุกกรณี**
-- **ระยะ**: จาก apex projection → ปรับตัวตาม curvature ของพื้นผิว
-- **Fallback**: ถ้า projection ไม่ valid → ใช้ gap/3 (สูตร Hermite มาตรฐาน)
-
+- **ทิศทาง**: ตาม PCA tangent เสมอ → **G1 ต่อเนื่องจริงทุกกรณี**
+- **ความโค้ง**: ปรับตัวตามระยะจุดบรรจบ (Apex) หรือใช้ระยะมาตรฐาน (gap/3) เมื่ออ้างอิง Apex ไม่ได้
 #### 5.3 Cubic Bezier Curve
 ```
 B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
@@ -284,25 +283,25 @@ PCA points → ×R^T + mean → Original space → Merge with distance check
 
 **ข้อดี**: ไม่มีปัญหา math asymptote (infinity) บนพื้นผิวแนวตั้ง เหมือนกับ `polyfit`
 
-### Apex-Guided Hermite Control Points + Auto Curve Tension
+### 2-Mode Bezier Construction + Auto Curve Tension
 
-ใช้ **hybrid approach** รวมข้อดีของทั้ง Apex และ Hermite:
+ใช้ **2-Mode approach** แยกการทำงานชัดเจนเพื่อความสะอาดของคณิตศาสตร์และรองรับกรณีขอบสุดขั้ว:
 
 1. หา **apex** จาก ray intersection ของ tangent ทั้งสองฝั่ง
-2. **ฉาย apex** ลงบน tangent ray เพื่อหา **scale** (รักษาทิศทาง → G1 จริง)
+2. ตรวจสอบความถูกต้องของ apex ว่าอยู่ใกล้พอ (ระยะไม่เกิน 50% ของ gap_length)
 3. ปรับ **curve tension** อัตโนมัติ (0.666 → 0.216) ตาม bulge ratio
-4. สร้าง control points: `Pi = endpoint + tension × scale × tangent`
-5. ถ้า projection ≤ 0 → **fallback ใช้ gap/3** (สูตร Hermite มาตรฐาน)
+4. เลือกโหมด:
+   * **⭐ Apex Mode:** ใช้ apex จริงคำนวณ control point `P = tension × apex + (1-tension) × P_edge`
+   * **📐 Hermite Mode:** ใช้ `gap/3` ตามทิศทาง tangent `P = P_edge + tension × (gap/3) × tangent`
 
-| สถานการณ์ | การจัดการ | G1 |
+| สถานการณ์ | การจัดการโหมด | การรับประกัน G1 |
 |---|---|---|
-| **Rays ตัดกัน (ปกติ)** | scale = apex projection, ผลเหมือน apex ดั้งเดิม | ✅ |
-| **Apex ถูก clamp** | scale = ฤาย apex ที่ลดลง, แต่ทิศทางยังตาม tangent | ✅ |
-| **Rays ขนาน / projection ≤ 0** | Fallback: gap/3 (Hermite มาตรฐาน) | ✅ |
-| **Bulge ratio สูง** | ลด tension เพื่อลด wobbling | ✅ |
+| **Rays ตัดกัน (ระยะ < 50% gap)** | ⭐ **Apex Mode** | ✅ (เส้น P0→P1 ชี้ไปที่ apex ตามทิศ tangent) |
+| **Rays ไกลเกินไป (ระยะ > 50% gap)** | 📐 **Hermite Mode** | ✅ (Control arm ชี้ไปตาม tangent ชัดเจน) |
+| **Rays ขนาน หรือตัดกันด้านหลัง** | 📐 **Hermite Mode** | ✅ (Control arm ชี้ไปตาม tangent ชัดเจน) |
+| **Bulge ratio สูง (ความโค้งมาก)** | ลด tension (ดึงเส้นให้ตึงขึ้นลด wobbling) | ✅ (ความต่อเนื่องยังคงอยู่ แค่เส้นเรียบขึ้น) |
 
-> **📌 หมายเหตุ**: ทั้งอัลกอริทึมหลัก (`hole_filler.py`) และ Tab 03 (การเชื่อมต่อ) ใน UI ใช้วิธี Apex-Guided Hermite เหมือนกัน
-
+> **📌 หมายเหตุ**: ทั้งอัลกอริทึมหลัก (`hole_filler.py`) และ Web UI Tab 03 ใช้วิธีเดียวกัน หากใช้โหมดไหน UI จะซ่อนเครื่องหมายของอีกโหมดเพื่อไม่ให้สับสน
 ---
 
 ## 📁 โครงสร้างไฟล์
