@@ -394,7 +394,7 @@ with tab_analysis:
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter3d(
                 x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
-                mode='markers', marker=dict(size=1.5, color='#94A3B8', opacity=0.2), name="Base"
+                mode='markers', marker=dict(size=2.5, color='#94A3B8', opacity=0.4), name="Base"
             ))
             if len(bound) > 0:
                 fig2.add_trace(go.Scatter3d(
@@ -731,7 +731,7 @@ with tab_result:
             fig3 = go.Figure()
             fig3.add_trace(go.Scatter3d(
                 x=orig[:, 0], y=orig[:, 1], z=orig[:, 2],
-                mode='markers', marker=dict(size=1.5, color='#CBD5E1', opacity=0.3), name="Original"
+                mode='markers', marker=dict(size=2.5, color='#CBD5E1', opacity=0.5), name="Original"
             ))
             if len(active_1) > 0:
                 fig3.add_trace(go.Scatter3d(
