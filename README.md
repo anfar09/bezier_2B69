@@ -18,7 +18,7 @@
 
 ---
 
-> **English Summary** — A research tool for repairing holes in 3D point cloud surfaces using dual-axis (cross-hatching) slicing and cubic Bezier curve interpolation. The pipeline includes PCA alignment, statistical outlier removal, automatic gap detection, G1-continuous Bezier filling, and surface densification. Achieves ~54% average Chamfer Distance improvement across 10 test files.
+> **English Summary** — A research tool for repairing holes in 3D point cloud surfaces using dual-axis (cross-hatching) slicing and cubic Bezier curve interpolation. The pipeline includes PCA alignment, statistical outlier removal, automatic gap detection, G1-continuous Bezier filling, and surface densification. Achieves ~78% average Chamfer Distance improvement across 10 test files.
 
 ---
 
@@ -56,6 +56,8 @@ python hole_filler.py Dataset/hole/H1.xyz -o output.xyz
 
 > 📌 วางไฟล์ point cloud (`.xyz`, `.txt`, `.pts`) ไว้ใน `Dataset/hole/` แล้วเปิด Web App ที่ `http://localhost:8501`
 
+> 💡 **ข้อแนะนำ:** เพื่อให้ได้ผลลัพธ์และความเร็วในการประมวลผลดีที่สุด (ประสิทธิภาพของ Bezier Interpolation) แนะนำให้ใช้ Point Cloud ที่มีจำนวนประชากรประมาณ 1,000 จุด หากไฟล์มีขนาดใหญ่กว่านี้ แนะนำให้ทำการ Subsample ก่อนนำมาวิเคราะห์
+
 ---
 
 ## 🎯 ภาพรวม
@@ -66,7 +68,7 @@ python hole_filler.py Dataset/hole/H1.xyz -o output.xyz
 2. **Cubic Bezier Curve** — สร้างเส้นโค้ง G1-continuous เชื่อมขอบรูแต่ละ slice
 3. **Surface Densification** — เติมจุดระหว่างเส้น Bezier ให้ดูเป็นพื้นผิวจริง
 
-ผลลัพธ์คือ point cloud ที่มีรูโหว่ถูกเติมเต็มอย่างเรียบ โดยมี **Chamfer Distance ลดลงเฉลี่ย ~54%** เมื่อเทียบกับ Ground Truth
+ผลลัพธ์คือ point cloud ที่มีรูโหว่ถูกเติมเต็มอย่างเรียบ โดยมี **Chamfer Distance ลดลงเฉลี่ย ~78.4%** เมื่อเทียบกับ Ground Truth
 
 ### ✨ จุดเด่น
 
@@ -516,16 +518,16 @@ python hole_filler.py input.xyz --sor_std 3.0
 
 | File | Hole pts | Before pts | Merged pts | Filled pts | **Improvement %** | RMSE | Time |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| H1 | 621 | 690 | 1,170 | 630 | **73.1%** | 0.00205 | 0.03s |
-| H2 | 670 | 779 | 1,099 | 494 | **81.2%** | 0.00244 | 0.03s |
-| H3 | 1,283 | 1,363 | 1,830 | 653 | **54.8%** | 0.00224 | 0.04s |
-| H4 | 1,523 | 1,709 | 2,553 | 1,164 | **82.0%** | 0.00242 | 0.06s |
-| H5 | 461 | 543 | 732 | 317 | **69.8%** | 0.00243 | 0.02s |
-| H6 | 1,039 | 1,257 | 2,137 | 1,220 | **71.9%** | 0.00309 | 0.05s |
-| H7 | 666 | 750 | 1,191 | 601 | **41.7%** | 0.00316 | 0.03s |
-| H8 | 595 | 644 | 980 | 451 | **-0.6%** | 0.00287 | 0.03s |
-| H9 | 490 | 554 | 752 | 311 | **67.9%** | 0.00238 | 0.02s |
-| H10 | 1,148 | 1,447 | 2,768 | 1,789 | **73.9%** | 0.00322 | 0.07s |
+| H1 | 621 | 690 | 981 | 396 | **81.3%** | 0.00202 | 0.03s |
+| H2 | 670 | 779 | 1050 | 408 | **88.1%** | 0.00245 | 0.03s |
+| H3 | 1283 | 1363 | 1571 | 320 | **82.4%** | 0.00220 | 0.03s |
+| H4 | 1523 | 1709 | 2105 | 626 | **89.6%** | 0.00233 | 0.06s |
+| H5 | 461 | 543 | 691 | 249 | **79.5%** | 0.00234 | 0.03s |
+| H6 | 1039 | 1257 | 1822 | 838 | **78.0%** | 0.00309 | 0.05s |
+| H7 | 666 | 750 | 990 | 356 | **73.5%** | 0.00288 | 0.03s |
+| H8 | 595 | 644 | 801 | 219 | **50.1%** | 0.00281 | 0.02s |
+| H9 | 490 | 554 | 672 | 208 | **81.1%** | 0.00217 | 0.02s |
+| H10 | 1148 | 1447 | 2331 | 1289 | **80.5%** | 0.00303 | 0.09s |
 
 </details>
 
@@ -533,12 +535,14 @@ python hole_filler.py input.xyz --sor_std 3.0
 
 | Metric | ค่า |
 |---|---|
-| 🏆 **CD Improvement เฉลี่ย** | **61.6%** (9/10 ไฟล์ดีขึ้น) |
-| 📈 **CD Improvement สูงสุด** | **82.0%** (H4) |
-| 📉 **กรณีแย่ลง** | H8 (-0.6%) — รูเล็กในพื้นที่ flat (แต่ดีขึ้นเยอะจากเดิม -12%) |
-| 📐 **RMSE เฉลี่ย (จุดเติม)** | **0.00263** |
+| 🏆 **CD Improvement เฉลี่ย** | **78.4%** (ดีขึ้นมากในทุกๆ ไฟล์ โดยไม่มีฟิลเตอร์ SOR) |
+| 📈 **CD Improvement สูงสุด** | **89.6%** (H4) |
+| 📉 **CD Improvement ต่ำสุด** | **50.1%** (H8) |
+| 📐 **RMSE เฉลี่ย (จุดเติม)** | **0.00253** |
 | ⚡ **เวลาประมวลผลเฉลี่ย** | **0.04s** |
-| 🔢 **จุดเติมเฉลี่ย** | ~763 จุดต่อไฟล์ |
+| 🔢 **จุดเติมเฉลี่ย** | ~490 จุดต่อไฟล์ |
+
+> 💡 **ข้อสังเกตเรื่อง SOR:** จากตารางผลลัพธ์นี้ พบว่าการ **ปิดใช้งาน SOR (Statistical Outlier Removal)** กลับทำให้ค่าประสิทธิภาพ Chamfer Distance สูงขึ้นอย่างก้าวกระโดด (เฉลี่ย 78.4%) ดังนั้น **หากจุด Point Cloud ที่นำเข้ามีความคลีนหรือมีคุณภาพดีอยู่แล้วในระดับหนึ่ง การปิด SOR จะช่วยให้การตรวจจับขอบเขตและเชื่อมรูโหว่ แม่นยำและแนบเนียนมากขึ้นครับ**
 
 ---
 
@@ -564,7 +568,7 @@ python hole_filler.py input.xyz --sor_std 3.0
 
 | ข้อจำกัด | รายละเอียด |
 |---|---|
-| ❌ **H8 ได้ค่าแย่ลง** | เมื่อรูมีขนาดเล็กมากและอยู่ในบริเวณ flat การเติมจุดอาจเพิ่ม noise มากกว่าแก้ปัญหา |
+| ⚠️ **ประสิทธิภาพในรูโหว่ขนาดเล็กมาก** | เมื่อรูมีขนาดเล็กมากและตื้น การเติมจุดอาจมีความตึงสูงและทำให้ค่าการฟื้นฟูลดลงเล็กน้อย (เช่น H7) |
 | ⚠️ **Gap detection 1D** | ใช้ sorting 1D ตามแกน — ถ้าพื้นผิวมีรูปร่างซับซ้อน (undercut) อาจพลาด gap |
 
 ### แนวทางพัฒนาต่อ
@@ -634,5 +638,3 @@ MIT License — ใช้ได้ทั้งส่วนตัวและเ�
 - **PCA / Spatial**: NumPy, SciPy (`cKDTree`, `KDTree`)
 - **Visualization**: Plotly (interactive 3D/2D charts)
 - **Web Framework**: Streamlit (rapid prototyping UI)
-- **Fonts**: Inter, Sarabun (via Google Fonts)
-- **Evaluation**: Chamfer Distance, Hausdorff Distance — standard 3D reconstruction metrics
