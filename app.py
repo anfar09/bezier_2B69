@@ -363,13 +363,14 @@ with tab_analysis:
         st.markdown("### ⚙️ พารามิเตอร์")
         s_th = st.text_input("Slice Thickness", placeholder="Auto", key="s_th")
         g_th = st.text_input("Gap Threshold", placeholder="Auto", key="g_th")
+        use_sor = st.toggle("เปิดใช้งาน SOR (ลบจุดรบกวน)", value=True, help="ปิดเมื่อรู้สึกว่ารูโหว่ถูกตรวจจับผิดพลาดเนื่องจากโมเดลแหว่ง")
 
         if st.button("🔍 เริ่มประมวลผล", use_container_width=True):
             with st.spinner("กำลังวิเคราะห์..."):
                 s_val = float(s_th) if s_th.strip() else None
                 g_val = float(g_th) if g_th.strip() else None
                 st.session_state["hf_result"] = process_point_cloud(
-                    points_raw, slice_thickness=s_val, gap_threshold=g_val, verbose=False
+                    points_raw, slice_thickness=s_val, gap_threshold=g_val, use_sor=use_sor, verbose=False
                 )
 
     with col_p:

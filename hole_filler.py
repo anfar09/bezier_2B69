@@ -215,6 +215,43 @@ def process_axis(points, primary_axis, slice_thickness, gap_threshold):
     return all_gap_pairs_3d
 
 
+def filter_gaps_by_boundary_neighbors(gaps, radius, min_neighbors=3):
+    """
+    Filter gaps by checking if their boundary points (p_left, p_right) have enough
+    neighboring boundary points. A true hole boundary should be contiguous across slices.
+    """
+    if not gaps:
+        return []
+
+    # 1. Collect all boundary points into a KDTree
+    b_pts = []
+    for g in gaps:
+        b_pts.append(g[0]) # p_left
+        b_pts.append(g[1]) # p_right
+    b_pts = np.array(b_pts)
+    
+    # We already imported cKDTree at the top. Use it.
+    from scipy.spatial import cKDTree
+    tree = cKDTree(b_pts)
+
+    valid_gaps = []
+    for g in gaps:
+        p_l = g[0]
+        p_r = g[1]
+        
+        # 2. Count neighbors. KDTree.query_ball_point returns list of neighbor indices.
+        # Includes the point itself, so count >= 1 always.
+        count_l = len(tree.query_ball_point(p_l, r=radius))
+        count_r = len(tree.query_ball_point(p_r, r=radius))
+        
+        # 3. If BOTH sides have neighbors, it's a valid gap (part of a real hole)
+        if count_l >= min_neighbors and count_r >= min_neighbors:
+            valid_gaps.append(g)
+
+    return valid_gaps
+
+
+
 
 
 def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
@@ -673,12 +710,16 @@ def process_point_cloud(points,
     t0 = _time.perf_counter()
     if verbose:
         print(f"[Axis1] Processing {axis_1}-axis slicing (PCA Space) ...")
-    gaps_axis1 = process_axis(pts_clean, axis_1, slice_thickness, gap_threshold)
+    raw_gaps_axis1 = process_axis(pts_clean, axis_1, slice_thickness, gap_threshold)
+    # Check if neighbors exist within 2x slice thickness (at least 1 other boundary point)
+    filter_radius = slice_thickness * 2.0
+    gaps_axis1 = filter_gaps_by_boundary_neighbors(raw_gaps_axis1, radius=filter_radius, min_neighbors=2)
 
     if use_cross_hatch:
         if verbose:
             print(f"[Axis2] Processing {axis_2}-axis slicing (PCA Space) ...")
-        gaps_axis2 = process_axis(pts_clean, axis_2, slice_thickness, gap_threshold)
+        raw_gaps_axis2 = process_axis(pts_clean, axis_2, slice_thickness, gap_threshold)
+        gaps_axis2 = filter_gaps_by_boundary_neighbors(raw_gaps_axis2, radius=filter_radius, min_neighbors=2)
     else:
         if verbose:
             print("[Axis2] SKIPPED (single-axis ablation)")
