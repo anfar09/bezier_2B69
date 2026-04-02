@@ -503,8 +503,8 @@ with tab_deepdive:
                 # PCA-based tangent estimation
                 from scipy.spatial import KDTree as _KDTree
                 _tree = _KDTree(slice_2d_all)
-                _, idx_l = _tree.query(p_l_2d, k=min(10, len(slice_2d_all)))
-                _, idx_r = _tree.query(p_r_2d, k=min(10, len(slice_2d_all)))
+                _, idx_l = _tree.query(p_l_2d, k=min(4, len(slice_2d_all)))
+                _, idx_r = _tree.query(p_r_2d, k=min(4, len(slice_2d_all)))
                 nb_l = slice_2d_all[[i for i in idx_l if not np.allclose(slice_2d_all[i], p_l_2d)]]
                 nb_r = slice_2d_all[[i for i in idx_r if not np.allclose(slice_2d_all[i], p_r_2d)]]
 

@@ -217,15 +217,22 @@ def filter_gaps_by_boundary_neighbors(gaps, radius, min_neighbors=3):
 
 def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
     """
-    Robust tangent estimation using 2D PCA eigenvalue extraction.
-    This avoids math asymptotes (infinity) on vertical surfaces.
+    Tangent estimation via average of vectors from the boundary point
+    to its 3 closest neighbors.
+
+    Steps:
+      1. Pick the 3 nearest neighbors from the surface side (behind the gap)
+      2. Compute vectors: neighbor - point, for each of the 3
+      3. Average those 3 vectors → tangent direction
+      4. Orient the tangent to point INTO the gap
     """
     pts = np.asarray(pts_2d, dtype=np.float64)
     point = np.asarray(point_2d, dtype=np.float64)
-    
-    if len(pts) < 2:
+
+    if len(pts) < 1:
         return np.zeros(2)
-        
+
+    # Filter to "behind" points (surface side, opposite to gap)
     behind = pts
     if opposite_2d is not None:
         opposite = np.asarray(opposite_2d, dtype=np.float64)
@@ -235,19 +242,31 @@ def estimate_tangent_2d(pts_2d, point_2d, opposite_2d=None):
             gap_unit = gap_dir / gap_norm
             dots = (pts - point) @ gap_unit
             behind_mask = dots < 0
-            if np.sum(behind_mask) >= 2:
+            if np.sum(behind_mask) >= 1:
                 behind = pts[behind_mask]
-                
-    cov = np.cov(behind.T)
-    evals, evecs = np.linalg.eigh(cov)
-    tangent = evecs[:, -1]  # eigenvector with largest eigenvalue
-    
+
+    # Take the 3 closest neighbors (or fewer if not enough)
+    dists = np.linalg.norm(behind - point, axis=1)
+    order = np.argsort(dists)
+    k = min(3, len(behind))
+    nearest = behind[order[:k]]
+
+    # Average of vectors from the point to each neighbor
+    vectors = nearest - point
+    tangent = np.mean(vectors, axis=0)
+
+    # Normalize
+    norm = np.linalg.norm(tangent)
+    if norm < 1e-12:
+        return np.zeros(2)
+    tangent = tangent / norm
+
     # Orient the tangent to point INTO the gap
     if opposite_2d is not None:
-        gap_dir = opposite - point
+        gap_dir = np.asarray(opposite_2d, dtype=np.float64) - point
         if np.dot(tangent, gap_dir) < 0:
             tangent = -tangent
-            
+
     return tangent
 
 def find_apex_2d(p_l, v_l, p_r, v_r, gap_length):
@@ -300,11 +319,11 @@ def cubic_bezier_fill_gap_g1(p_left, p_right, slice_points, num_points=20):
     if gap_length < 1e-12:
         return np.array([p_l]), np.zeros(2), np.zeros(2), None, []
 
-    # Filter neighbors near left and right
+    # Filter neighbors near left and right (3 neighbors + 1 for self-match filtering)
     tree = KDTree(slice_points)
-    _, idx_l = tree.query(p_l, k=min(10, len(slice_points)))
-    _, idx_r = tree.query(p_r, k=min(10, len(slice_points)))
-    
+    _, idx_l = tree.query(p_l, k=min(4, len(slice_points)))
+    _, idx_r = tree.query(p_r, k=min(4, len(slice_points)))
+
     nb_l = slice_points[[i for i in idx_l if not np.allclose(slice_points[i], p_l)]]
     nb_r = slice_points[[i for i in idx_r if not np.allclose(slice_points[i], p_r)]]
 
