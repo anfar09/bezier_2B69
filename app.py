@@ -531,13 +531,12 @@ with tab_deepdive:
                         curve_tension = 0.666 - (factor * 0.45)
 
                     P1 = curve_tension * apex_2d + (1.0 - curve_tension) * P0
-                    P2 = curve_tension * apex_2d + (1.0 - curve_tension) * P3
+                    P2 = (1.0 - curve_tension) * apex_2d + curve_tension * P3
                     use_apex = True
                 else:
                     # HERMITE MODE: gap/3 along tangent
                     hermite_scale = gap_length / 3.0
                     curve_tension = 0.666
-                    bulge_ratio = 0.0
 
                     P1 = P0 + curve_tension * hermite_scale * v_left
                     P2 = P3 + curve_tension * hermite_scale * v_right
@@ -670,21 +669,22 @@ with tab_deepdive:
                     p_c_pca[ax_v] = apex_2d[1]
                     p_c_orig = apply_inverse_pca(p_c_pca.reshape(1, 3), rot_mat, mean_pt)[0]
                     method_badge = '<span style="background:#06B6D4; color:white; padding:3px 10px; border-radius:6px; font-size:0.85rem;">⭐ Apex Mode</span>'
-                    method_detail = f"""<b>⭐ Apex:</b> [{p_c_orig[0]:.4f}, {p_c_orig[1]:.4f}, {p_c_orig[2]:.4f}]<br>
-                <b>Bulge Ratio:</b> {bulge_ratio:.4f}<br><br>
-                <b>📐 Control Points (tension×apex + (1-tension)×P):</b>"""
+                    method_detail = f"""<b>⭐ Apex:</b> [{p_c_orig[0]:.4f}, {p_c_orig[1]:.4f}, {p_c_orig[2]:.4f}]<br><br>
+                <b>📐 สูตร Control Points:</b><br>
+                P1 = ⅔·Apex + ⅓·P0<br>
+                P2 = ⅓·Apex + ⅔·P3"""
                 else:
                     method_badge = '<span style="background:#8B5CF6; color:white; padding:3px 10px; border-radius:6px; font-size:0.85rem;">📐 Hermite (gap/3)</span>'
-                    method_detail = f"""<b>📐 Control Points (P + tension×(gap/3)×tangent):</b><br>
-                <b>Scale:</b> {gap_length/3.0:.4f} (gap/3)<br><br>
-                <b>ทำไมใช้ gap/3:</b> tangent rays ไม่ชนกัน หรือ apex ไกลเกิน"""
+                    method_detail = f"""<b>📐 สูตร Control Points:</b><br>
+                P1 = P0 + (gap/3)·v_left<br>
+                P2 = P3 + (gap/3)·v_right<br>
+                <b>Scale:</b> {gap_length/3.0:.4f} (gap/3)"""
 
                 st.markdown(f"""
                 <div class="method-card">
                 <b>📝 Bezier Construction</b> &nbsp; {method_badge}<br><br>
                 <b>Slice:</b> {slice_axis}={axis_val:.4f} &nbsp;|&nbsp;
                 <b>Gap:</b> {gap_dist:.4f} &nbsp;|&nbsp;
-                <b>Curve Tension:</b> {curve_tension:.3f} &nbsp;|&nbsp;
                 <b>G1 Angle:</b> {g1_angle:.1f}°<br><br>
                 <b>🔹 Boundary Points:</b><br>
                 <b>P0 (pl_n):</b> [{p_left_orig[0]:.4f}, {p_left_orig[1]:.4f}, {p_left_orig[2]:.4f}]<br>
@@ -794,11 +794,8 @@ with tab_metrics:
 
             # === COMPUTE ALL METRICS ===
             cd_merged = chamfer_distance(merged_pts, gt_pts)
-            cd_input = chamfer_distance(points_raw, gt_pts)
             hd_merged = hausdorff_distance(merged_pts, gt_pts)
             rmse_val = rmse(filled_pts, gt_pts) if len(filled_pts) > 0 else 0.0
-            improvement = cd_input['symmetric'] - cd_merged['symmetric']
-            imp_pct = (improvement / cd_input['symmetric'] * 100) if cd_input['symmetric'] > 1e-15 else 0
 
             # === COMPUTE ERROR STATISTICS ===
             errors_merged = per_point_error(merged_pts, gt_pts)
@@ -813,37 +810,23 @@ with tab_metrics:
             st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
             # === METRIC CARDS WITH THAI DESCRIPTIONS ===
-            c1, c2, c3, c4, c5 = st.columns(5)
-            def metric_html(label, value, desc, accent="blue", delta=None, delta_positive=True):
-                delta_html = ""
-                if delta is not None:
-                    cls = "positive" if delta_positive else "negative"
-                    arrow = "▲" if delta_positive else "▼"
-                    delta_html = f'<div class="metric-delta {cls}">{arrow} {delta}</div>'
+            c1, c2, c3 = st.columns(3)
+            def metric_html(label, value, desc, accent="blue"):
                 return f'''<div class="metric-card accent-{accent}">
 <div class="metric-label">{label}</div>
 <div class="metric-value">{value}</div>
-{delta_html}
 <div style="font-size:0.7rem; color:var(--text-muted); margin-top:8px; line-height:1.4;">{desc}</div>
 </div>'''
 
             c1.markdown(metric_html(
-                "CD (Input→GT)", f"{cd_input['symmetric']:.6f}",
-                "ระยะห่างเฉลี่ยยกกำลังสอง ระหว่าง input (มีรู) กับ ground truth — ยิ่งสูง ยิ่งต่างจากต้นฉบับมาก",
-                "red"), unsafe_allow_html=True)
-            c2.markdown(metric_html(
                 "CD (Repaired→GT)", f"{cd_merged['symmetric']:.6f}",
                 "ระยะห่างเฉลี่ยยกกำลังสอง ระหว่างผลซ่อม กับ ground truth — ยิ่งต่ำ ยิ่งใกล้ต้นฉบับ",
                 "green"), unsafe_allow_html=True)
-            c3.markdown(metric_html(
-                "ดีขึ้น", f"{imp_pct:.1f}%",
-                "CD ลดลงกี่ % หลังซ่อม — ค่าบวก = ดีขึ้น, ค่าลบ = แย่ลง",
-                "blue", delta=f"{improvement:.6f}", delta_positive=improvement > 0), unsafe_allow_html=True)
-            c4.markdown(metric_html(
+            c2.markdown(metric_html(
                 "RMSE (จุดเติม)", f"{rmse_val:.6f}",
                 "ค่าเฉลี่ยราก (Root Mean Square) ของระยะห่างจุดที่เติม ไปยัง GT ที่ใกล้ที่สุด",
                 "orange"), unsafe_allow_html=True)
-            c5.markdown(metric_html(
+            c3.markdown(metric_html(
                 "Hausdorff", f"{hd_merged['symmetric']:.6f}",
                 "ระยะห่างสูงสุดที่เลวร้ายที่สุด — จุดที่ไกลจาก GT มากที่สุด (worst-case error)",
                 "purple"), unsafe_allow_html=True)
@@ -968,10 +951,6 @@ with tab_metrics:
                     'ตัวชี้วัด': [
                         'CD Forward (A→B)', 'CD Backward (B→A)', 'CD Symmetric (รวม)',
                         'Hausdorff Forward', 'Hausdorff Backward', 'Hausdorff Symmetric'],
-                    'Input → GT': [
-                        f"{cd_input['forward']:.8f}", f"{cd_input['backward']:.8f}", f"{cd_input['symmetric']:.8f}",
-                        "—", "—", "—"
-                    ],
                     'Repaired → GT': [
                         f"{cd_merged['forward']:.8f}", f"{cd_merged['backward']:.8f}", f"{cd_merged['symmetric']:.8f}",
                         f"{hd_merged['forward']:.8f}", f"{hd_merged['backward']:.8f}", f"{hd_merged['symmetric']:.8f}",
@@ -980,14 +959,14 @@ with tab_metrics:
                 st.dataframe(cd_df, use_container_width=True, hide_index=True)
 
             with col_bar:
-                st.markdown("### 📊 เปรียบเทียบ Input vs Repaired")
+                st.markdown("### 📊 Repaired → GT Metrics")
                 fig_cd = go.Figure(data=[
-                    go.Bar(name='ก่อนซ่อม (Input)', x=['Forward', 'Backward', 'Symmetric'],
-                           y=[cd_input['forward'], cd_input['backward'], cd_input['symmetric']],
-                           marker_color='#EF4444'),
-                    go.Bar(name='หลังซ่อม (Repaired)', x=['Forward', 'Backward', 'Symmetric'],
+                    go.Bar(name='Chamfer Distance', x=['Forward', 'Backward', 'Symmetric'],
                            y=[cd_merged['forward'], cd_merged['backward'], cd_merged['symmetric']],
                            marker_color='#10B981'),
+                    go.Bar(name='Hausdorff Distance', x=['Forward', 'Backward', 'Symmetric'],
+                           y=[hd_merged['forward'], hd_merged['backward'], hd_merged['symmetric']],
+                           marker_color='#8B5CF6'),
                 ])
                 fig_cd.update_layout(
                     **themed_2d_layout(),
