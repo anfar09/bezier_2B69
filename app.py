@@ -55,7 +55,7 @@ def themed_3d_layout(**overrides):
             zaxis=dict(gridcolor=pc['grid'], backgroundcolor=pc['surface_bg'],
                        color=pc['text'], showbackground=True),
         ),
-        paper_bgcolor=pc['paper'], height=600,
+        paper_bgcolor=pc['paper'], height=450,
         margin=dict(l=0, r=0, t=0, b=0),
         font=dict(color=pc['text']),
         legend=dict(font=dict(color=pc['text']))
@@ -252,6 +252,23 @@ html, body, [class*="css"] {
     margin: 24px 0;
 }
 
+/* Responsive Design (Mobile/Phone) */
+@media (max-width: 768px) {
+    .app-header { padding: 16px; text-align: center; margin-bottom: 12px; }
+    .app-header .title { font-size: 1.4rem; }
+    .app-header .subtitle { font-size: 0.8rem; }
+    
+    .stTabs [data-baseweb="tab-list"] { flex-wrap: nowrap !important; overflow-x: auto; padding-bottom: 5px; }
+    .stTabs [data-baseweb="tab"] { font-size: 0.75rem; padding: 0 12px; height: 38px; }
+    
+    .glass-card, .method-card { padding: 12px; margin-bottom: 10px; }
+    .step-header { font-size: 1.1rem; margin: 16px 0 8px 0; }
+    
+    .metric-card { padding: 12px 8px; }
+    .metric-card .metric-value { font-size: 1.2rem; }
+    .metric-card .metric-label { font-size: 0.65rem; }
+}
+
 /* Hide Streamlit deploy toolbar */
 [data-testid="stToolbar"] { display: none !important; }
 [data-testid="stDecoration"] { display: none !important; }
@@ -328,7 +345,6 @@ with tab_intro:
         การซ่อมแซมพื้นผิว 3 มิติ เป็นส่วนสำคัญในงานอุตสาหกรรมสมัยใหม่
         ช่วยให้สามารถกู้คืนโมเดลที่เสียหายจากการสแกน<br><br>
         <b>📋 ขั้นตอนหลัก:</b><br>
-        • <b>Data Cleaning:</b> การลบจุดรบกวน (SOR)<br>
         • <b>Geometric Alignment:</b> การจัดวาง PCA<br>
         • <b>Surface Generation:</b> Bezier Cross-Hatching + Surface Densification
         </div>
@@ -355,22 +371,20 @@ with tab_analysis:
     with col_m:
         st.markdown('<p class="step-header">Methodology</p>', unsafe_allow_html=True)
         st.markdown("""
-        <div class="method-card"><b>1. Statistical Removal (SOR)</b><br>กรองจุดที่ไม่ใช่ส่วนของพื้นผิวจริง</div>
-        <div class="method-card"><b>2. Axis Alignment (PCA)</b><br>คำนวณ Variance เพื่อหาแกนหลัก</div>
-        <div class="method-card"><b>3. Surface Densification</b><br>เติมจุดระหว่าง Bezier curves เพื่อสร้างพื้นผิวสมจริง</div>
+        <div class="method-card"><b>1. Axis Alignment (PCA)</b><br>คำนวณ Variance เพื่อหาแกนหลัก</div>
+        <div class="method-card"><b>2. Surface Densification</b><br>เติมจุดระหว่าง Bezier curves เพื่อสร้างพื้นผิวสมจริง</div>
         """, unsafe_allow_html=True)
 
         st.markdown("### ⚙️ พารามิเตอร์")
         s_th = st.text_input("Slice Thickness", placeholder="Auto", key="s_th")
         g_th = st.text_input("Gap Threshold", placeholder="Auto", key="g_th")
-        use_sor = st.toggle("เปิดใช้งาน SOR (ลบจุดรบกวน)", value=True, help="ปิดเมื่อรู้สึกว่ารูโหว่ถูกตรวจจับผิดพลาดเนื่องจากโมเดลแหว่ง")
 
         if st.button("🔍 เริ่มประมวลผล", use_container_width=True):
             with st.spinner("กำลังวิเคราะห์..."):
                 s_val = float(s_th) if s_th.strip() else None
                 g_val = float(g_th) if g_th.strip() else None
                 st.session_state["hf_result"] = process_point_cloud(
-                    points_raw, slice_thickness=s_val, gap_threshold=g_val, use_sor=use_sor, verbose=False
+                    points_raw, slice_thickness=s_val, gap_threshold=g_val, verbose=False
                 )
 
     with col_p:
@@ -638,7 +652,7 @@ with tab_deepdive:
                     yaxis=dict(gridcolor=pc['grid']),
                     paper_bgcolor=pc['paper'], plot_bgcolor=pc['plot'],
                     font=dict(color=pc['text']),
-                    height=550, margin=dict(l=60, r=20, t=30, b=60),
+                    height=450, margin=dict(l=60, r=20, t=30, b=60),
                     legend=dict(orientation='h', yanchor='bottom', y=-0.2, xanchor='center', x=0.5,
                                 font=dict(color=pc['text'])),
                 )
@@ -744,7 +758,7 @@ with tab_result:
                     mode='markers', marker=dict(size=2.5, color='#F59E0B', opacity=0.9), name="Secondary (Loft)"
                 ))
             layout_4 = themed_3d_layout(
-                height=700,
+                height=500,
                 legend=dict(orientation="h", yanchor="bottom", y=0.02, xanchor="right", x=1,
                             font=dict(color=pc['text']))
             )
@@ -870,7 +884,7 @@ with tab_metrics:
                     name="Error",
                     hovertemplate="x: %{x:.4f}<br>y: %{y:.4f}<br>z: %{z:.4f}<br>Error: %{marker.color:.6f}<extra></extra>"
                 )])
-                layout_heat = themed_3d_layout(height=550)
+                layout_heat = themed_3d_layout(height=400)
                 if axis_labels_5:
                     layout_heat['scene'].update(axis_labels_5)
                 fig_heat.update_layout(**layout_heat)
@@ -884,7 +898,7 @@ with tab_metrics:
                     marker=dict(size=1.5, color='#60A5FA', opacity=0.5),
                     name="Ground Truth"
                 )])
-                layout_gt = themed_3d_layout(height=550)
+                layout_gt = themed_3d_layout(height=400)
                 if axis_labels_5:
                     layout_gt['scene'].update(axis_labels_5)
                 fig_gt.update_layout(**layout_gt)

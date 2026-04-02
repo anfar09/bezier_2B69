@@ -2,11 +2,10 @@
 3D Point Cloud Hole Filling via Dual-Axis Slicing & Bezier Cross-Hatching
 
 Algorithm Pipeline:
-  1. Statistical Outlier Removal (SOR)
-  2. Axis Selection via Variance Detecter
-  3. Dual-Axis Slicing & 1D Gap Detection
-  4. Slice-by-Slice Cubic Bezier Curve Filling
-  5. Cross-Hatching Surface Generation (merge both axes)
+  1. Axis Selection via Variance Detecter
+  2. Dual-Axis Slicing & 1D Gap Detection
+  3. Slice-by-Slice Cubic Bezier Curve Filling
+  4. Cross-Hatching Surface Generation (merge both axes)
 """
 
 import numpy as np
@@ -15,45 +14,7 @@ from scipy.spatial import cKDTree, KDTree
 
 
 # =============================================================================
-# 1. STATISTICAL OUTLIER REMOVAL
-# =============================================================================
-
-def statistical_outlier_removal(points, k=10, std_multiplier=2.0):
-    """
-    Remove isolated noise points using Statistical Outlier Removal.
-
-    For each point, compute mean distance to its k-nearest neighbours.
-    Points whose mean distance exceeds (global_mean + std_multiplier * global_std)
-    are considered outliers.
-
-    Parameters
-    ----------
-    points : array-like, shape (N, 3)
-    k      : int, number of neighbours (default 10)
-    std_multiplier : float, threshold multiplier (default 2.0)
-
-    Returns
-    -------
-    mask : ndarray of bool, True = inlier
-    """
-    pts = np.asarray(points)
-    if pts.shape[0] == 0:
-        return np.array([], dtype=bool)
-
-    tree = KDTree(pts)
-    distances, _ = tree.query(pts, k=k + 1)   # includes self at index 0
-    mean_dist = distances[:, 1:].mean(axis=1)  # exclude self
-
-    global_mean = mean_dist.mean()
-    global_std  = mean_dist.std()
-    threshold   = global_mean + std_multiplier * global_std
-
-    mask = mean_dist <= threshold
-    return mask
-
-
-# =============================================================================
-# 2. PCA ALIGNMENT – ROTATION TO PRINCIPAL AXES
+# 1. PCA ALIGNMENT – ROTATION TO PRINCIPAL AXES
 # =============================================================================
 
 def pca_align(points):
@@ -104,7 +65,7 @@ def axis_col(axis_name):
 
 
 # =============================================================================
-# 3. DUAL-AXIS SLICING & 1D GAP DETECTION
+# 2. DUAL-AXIS SLICING & 1D GAP DETECTION
 # =============================================================================
 
 def bin_points_along_axis(points, slice_axis, slice_thickness):
@@ -423,7 +384,7 @@ def cubic_bezier_fill_gap(p_left_3d, p_right_3d, num_points=20, neighbors_left=N
 
 
 # =============================================================================
-# 5. CROSS-HATCHING SURFACE GENERATION
+# 4. CROSS-HATCHING SURFACE GENERATION
 # =============================================================================
 
 def merge_and_average_points(original, new_points, merge_distance=1e-3):
@@ -461,7 +422,7 @@ def merge_and_average_points(original, new_points, merge_distance=1e-3):
 
 
 # =============================================================================
-# 6. SURFACE DENSIFICATION — INTERMEDIATE CURVES & UNIFORM SCATTER
+# 5. SURFACE DENSIFICATION — INTERMEDIATE CURVES & UNIFORM SCATTER
 # =============================================================================
 
 def fill_all_gaps_tracked(points, gap_pairs, num_points_per_gap=20,
@@ -640,16 +601,13 @@ def process_point_cloud(points,
                         gap_threshold=None,
                         num_points_per_gap=20,
                         neighbor_k=5,
-                        sor_k=10,
-                        sor_std_multiplier=2.0,
-                        use_sor=True,
                         use_pca=True,
                         use_cross_hatch=True,
                         verbose=True):
     """
     Complete hole-filling pipeline with PCA alignment for robust detection.
 
-    Ablation flags: use_sor, use_pca, use_cross_hatch
+    Ablation flags: use_pca, use_cross_hatch
     """
     import time as _time
     timings = {}
@@ -670,22 +628,8 @@ def process_point_cloud(points,
         mean_pt = np.zeros(3)
     timings['pca'] = _time.perf_counter() - t0
 
-    # ---- Step 1: SOR in PCA Space ----
-    t0 = _time.perf_counter()
-    if use_sor:
-        if verbose:
-            print(f"[SOR] Input: {len(pts_pca)} points")
-        inlier_mask = statistical_outlier_removal(pts_pca, k=sor_k, std_multiplier=sor_std_multiplier)
-        pts_clean   = pts_pca[inlier_mask]
-        if verbose:
-            print(f"[SOR] After outlier removal: {len(pts_clean)} points  "
-                  f"({len(pts_clean)/len(pts_pca)*100:.1f}%)")
-    else:
-        if verbose:
-            print("[SOR] SKIPPED (ablation)")
-        inlier_mask = np.ones(len(pts_pca), dtype=bool)
-        pts_clean = pts_pca
-    timings['sor'] = _time.perf_counter() - t0
+    # ---- Step 1: Mapping ----
+    pts_clean = pts_pca
 
     # ---- Auto-Tuning: KDTree-based avg_point_spacing ----
     t0 = _time.perf_counter()
@@ -818,7 +762,6 @@ def process_point_cloud(points,
         'variances': {'PCA_X': 0, 'PCA_Y': 0, 'PCA_Z': 0},
         'gaps_axis1': gaps_axis1,
         'gaps_axis2': gaps_axis2,
-        'inlier_mask': inlier_mask,
         'num_filled': len(bezier_all_orig),
         'avg_point_spacing': avg_point_spacing,
         'slice_thickness': slice_thickness,
@@ -845,8 +788,6 @@ if __name__ == '__main__':
     parser.add_argument('--gap_threshold',    type=float, default=None)
     parser.add_argument('--num_points',       type=int,   default=20)
     parser.add_argument('--neighbor_k',       type=int,   default=5)
-    parser.add_argument('--sor_k',            type=int,   default=10)
-    parser.add_argument('--sor_std',          type=float, default=2.0)
     args = parser.parse_args()
 
     data = np.loadtxt(args.input)
@@ -858,8 +799,6 @@ if __name__ == '__main__':
         gap_threshold=args.gap_threshold,
         num_points_per_gap=args.num_points,
         neighbor_k=args.neighbor_k,
-        sor_k=args.sor_k,
-        sor_std_multiplier=args.sor_std,
     )
 
     # Save merged output

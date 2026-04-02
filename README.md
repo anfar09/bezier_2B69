@@ -18,7 +18,7 @@
 
 ---
 
-> **English Summary** — A research tool for repairing holes in 3D point cloud surfaces using dual-axis (cross-hatching) slicing and cubic Bezier curve interpolation. The pipeline includes PCA alignment, statistical outlier removal, automatic gap detection, G1-continuous Bezier filling, and surface densification. Achieves ~78% average Chamfer Distance improvement across 10 test files.
+> **English Summary** — A research tool for repairing holes in 3D point cloud surfaces using dual-axis (cross-hatching) slicing and cubic Bezier curve interpolation. The pipeline includes PCA alignment, automatic gap detection, G1-continuous Bezier filling, and surface densification. Achieves ~78% average Chamfer Distance improvement across 10 test files.
 
 ---
 
@@ -97,13 +97,12 @@ graph TB
 
     subgraph Core["⚙️ hole_filler.py — Core Pipeline"]
         S1["1. PCA Alignment"]
-        S2["2. SOR (Outlier Removal)"]
-        S3["3. Auto-Tuning Parameters"]
-        S4["4. Cross-Hatch Slicing"]
-        S5["5. Bezier Curve Fill"]
-        S6["6. Surface Densification"]
-        S7["7. Inverse PCA + Merge"]
-        S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+        S3["2. Auto-Tuning Parameters"]
+        S4["3. Cross-Hatch Slicing"]
+        S5["4. Bezier Curve Fill"]
+        S6["5. Surface Densification"]
+        S7["6. Inverse PCA + Merge"]
+        S1 --> S3 --> S4 --> S5 --> S6 --> S7
     end
 
     subgraph Eval["📊 metrics.py — Evaluation"]
@@ -150,20 +149,6 @@ Input Point Cloud → Center (ลบ mean) → PCA → จัดแกนตา�
 - จัดวาง: **PCA-X** = variance สูงสุด, **PCA-Y** = รอง, **PCA-Z** = ต่ำสุด (ความหนา)
 - ทำให้การ slice ตรงกับโครงสร้างหลักของพื้นผิว
 - Ensure right-handed coordinate system (`det(R) > 0`)
-
-</details>
-
-<details>
-<summary><strong>Step 2: Statistical Outlier Removal (SOR)</strong> — กรอง noise</summary>
-
-```
-PCA Points → หา k-NN mean distance → ตัดจุดที่ > μ + 2σ
-```
-
-- ใช้ k=10 nearest neighbors (ปรับได้ผ่าน `sor_k`)
-- คำนวณ mean distance ของแต่ละจุด
-- กรองจุดที่อยู่ไกลผิดปกติ (threshold = `mean + std_multiplier × std`)
-- ค่า `std_multiplier` default = 2.0 (ปรับได้ผ่าน `sor_std_multiplier`)
 
 </details>
 
@@ -311,7 +296,7 @@ PCA points → ×R^T + mean → Original space → Merge with distance check
 ```
 bezier_2B69/
 ├── app.py               # Streamlit UI (Light/Dark theme, 5 tabs)
-├── hole_filler.py       # Core algorithm + CLI (PCA → SOR → Slice → Bezier → Densify → Merge)
+├── hole_filler.py       # Core algorithm + CLI (PCA → Slice → Bezier → Densify → Merge)
 ├── metrics.py           # Chamfer, Hausdorff, RMSE, Roughness, Density Uniformity
 ├── experiments.py       # Synthetic holes, noise injection, ablation study
 ├── slicer.py            # File I/O (.xyz, .txt, .pts)
@@ -443,9 +428,6 @@ result = process_point_cloud(
     gap_threshold=0.008,        # default: auto (avg_spacing × 5)
     num_points_per_gap=20,      # จุดต่อ gap (จะ auto ปรับตามขนาด gap)
     neighbor_k=5,               # k neighbors สำหรับ tangent estimation
-    sor_k=10,                   # k neighbors สำหรับ SOR
-    sor_std_multiplier=2.0,     # SOR threshold multiplier
-    use_sor=True,               # เปิด/ปิด SOR (สำหรับ ablation)
     use_pca=True,               # เปิด/ปิด PCA (สำหรับ ablation)
     use_cross_hatch=True,       # เปิด/ปิด dual-axis (single-axis ablation)
     verbose=True,
@@ -461,7 +443,7 @@ result = process_point_cloud(
 | `combined_bezier_pts` | `ndarray (M, 3)` | เฉพาะจุดที่เติมใหม่ (ทั้งสองแกนรวมกัน) |
 | `bezier_pts_axis1` | `ndarray` | จุดที่เติมจากแกนหลัก (PCA-X) |
 | `bezier_pts_axis2` | `ndarray` | จุดที่เติมจากแกนรอง (PCA-Y) |
-| `original_inlier_points` | `ndarray` | จุดดั้งเดิมหลัง SOR (ใน original space) |
+| `original_inlier_points` | `ndarray` | จุดดั้งเดิม (ใน original space) |
 | `combined_boundary_pts` | `ndarray` | จุดขอบรูทั้งหมด |
 | `gaps_axis1` | `list` | รายการ gap pairs แกน 1: `[(p_left, p_right, dist, axis_val), ...]` |
 | `gaps_axis2` | `list` | รายการ gap pairs แกน 2 |
@@ -471,9 +453,8 @@ result = process_point_cloud(
 | `num_filled` | `int` | จำนวนจุดที่เติมทั้งหมด |
 | `rotation_matrix` | `ndarray (3, 3)` | PCA rotation matrix |
 | `mean_pt` | `ndarray (3,)` | PCA centroid |
-| `pts_clean_pca` | `ndarray` | จุดหลัง SOR ใน PCA space |
-| `timings` | `dict` | เวลาแต่ละขั้นตอน: `pca`, `sor`, `auto_tune`, `gap_detection`, `fill`, `merge`, `total` |
-| `inlier_mask` | `ndarray[bool]` | Mask จาก SOR |
+| `pts_clean_pca` | `ndarray` | จุดใน PCA space |
+| `timings` | `dict` | เวลาแต่ละขั้นตอน: `pca`, `auto_tune`, `gap_detection`, `fill`, `merge`, `total` |
 
 </details>
 
@@ -491,8 +472,6 @@ python hole_filler.py <input_file> [options]
 | `--gap_threshold` | Auto | ระยะ gap threshold |
 | `--num_points` | 20 | จุดต่อ gap (base) |
 | `--neighbor_k` | 5 | k neighbors สำหรับ tangent |
-| `--sor_k` | 10 | k neighbors สำหรับ SOR |
-| `--sor_std` | 2.0 | SOR std multiplier |
 
 **ตัวอย่าง:**
 ```bash
@@ -501,10 +480,7 @@ python hole_filler.py Dataset/hole/H1.xyz -o output.xyz
 
 # กำหนดค่าเอง
 python hole_filler.py Dataset/hole/H5.xyz -o H5_fixed.xyz \
-    --slice_thickness 0.005 --gap_threshold 0.008 --sor_k 15
-
-# ลดความไว SOR
-python hole_filler.py input.xyz --sor_std 3.0
+    --slice_thickness 0.005 --gap_threshold 0.008
 ```
 
 ---
@@ -541,8 +517,6 @@ python hole_filler.py input.xyz --sor_std 3.0
 | 📐 **RMSE เฉลี่ย (จุดเติม)** | **0.00253** |
 | ⚡ **เวลาประมวลผลเฉลี่ย** | **0.04s** |
 | 🔢 **จุดเติมเฉลี่ย** | ~490 จุดต่อไฟล์ |
-
-> 💡 **ข้อสังเกตเรื่อง SOR:** จากตารางผลลัพธ์นี้ พบว่าการ **ปิดใช้งาน SOR (Statistical Outlier Removal)** กลับทำให้ค่าประสิทธิภาพ Chamfer Distance สูงขึ้นอย่างก้าวกระโดด (เฉลี่ย 78.4%) ดังนั้น **หากจุด Point Cloud ที่นำเข้ามีความคลีนหรือมีคุณภาพดีอยู่แล้วในระดับหนึ่ง การปิด SOR จะช่วยให้การตรวจจับขอบเขตและเชื่อมรูโหว่ แม่นยำและแนบเนียนมากขึ้นครับ**
 
 ---
 

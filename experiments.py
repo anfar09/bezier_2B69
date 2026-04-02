@@ -262,18 +262,17 @@ def run_ablation_experiment(points, pipeline_fn_with_flags):
     Parameters
     ----------
     points : array (N, 3)
-    pipeline_fn_with_flags : callable(points, use_sor, use_pca, use_cross_hatch) -> result_dict
+    pipeline_fn_with_flags : callable(points, use_pca, use_cross_hatch) -> result_dict
 
     Returns
     -------
     dict of config_name -> result_dict
     """
     configs = {
-        'Full Pipeline':        {'use_sor': True,  'use_pca': True,  'use_cross_hatch': True},
-        'No SOR':               {'use_sor': False, 'use_pca': True,  'use_cross_hatch': True},
-        'No PCA':               {'use_sor': True,  'use_pca': False, 'use_cross_hatch': True},
-        'Single Axis (No CH)':  {'use_sor': True,  'use_pca': True,  'use_cross_hatch': False},
-        'Minimal (No SOR+PCA)': {'use_sor': False, 'use_pca': False, 'use_cross_hatch': True},
+        'Full Pipeline':        {'use_pca': True,  'use_cross_hatch': True},
+        'No PCA':               {'use_pca': False, 'use_cross_hatch': True},
+        'Single Axis (No CH)':  {'use_pca': True,  'use_cross_hatch': False},
+        'Minimal (No PCA)': {'use_pca': False, 'use_cross_hatch': True},
     }
 
     results = {}
